@@ -36,18 +36,28 @@
       padding: 8px 14px;
       font-size: 13px;
       cursor: pointer;
+      white-space: nowrap;
     }
-    button:hover { background: #166fe5; }
+    button:hover {
+      background: #166fe5;
+    }
     button.secondary {
       background: #e4e6eb;
       color: #1c1e21;
     }
-    button.secondary:hover { background: #d8dade; }
+    button.secondary:hover {
+      background: #d8dade;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     #status {
       font-size: 12px;
       color: #65676b;
       margin-bottom: 10px;
       min-height: 14px;
+      word-wrap: break-word;
     }
     #summary {
       background: white;
@@ -58,7 +68,7 @@
     }
     #summary .stat {
       display: inline-block;
-      width: 32%;
+      width: 100%;
       text-align: center;
     }
     #summary .stat .num {
@@ -77,26 +87,45 @@
     .post-card {
       background: white;
       border-radius: 8px;
-      padding: 8px 10px;
+      padding: 10px 12px;
       margin-bottom: 8px;
       font-size: 12px;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      border: 1px solid #e4e6eb;
+    }
+    .post-card:hover {
+      background: #f5f6f8;
+      border-color: #1877f2;
+    }
+    .post-card.selected {
+      border-color: #1877f2;
+      background: #e7f3ff;
     }
     .post-card .snippet {
       margin-bottom: 6px;
-      line-height: 1.35;
+      line-height: 1.4;
       color: #1c1e21;
+      font-size: 13px;
     }
     .post-card .metrics {
       display: flex;
-      gap: 10px;
+      gap: 12px;
       color: #65676b;
       font-size: 11px;
+      margin-top: 4px;
     }
     .empty {
       text-align: center;
       color: #65676b;
       font-size: 12px;
       padding: 20px 0;
+    }
+    #stopBtn {
+      background: #dc3545;
+    }
+    #stopBtn:hover {
+      background: #c82333;
     }
   </style>
 </head>
@@ -111,19 +140,13 @@
   </div>
   <div class="row">
     <button id="autoScanBtn" style="flex:1;">▶ Auto-scan (scroll &amp; collect)</button>
-    <button class="secondary" id="stopBtn" style="display:none;">Stop</button>
+    <button id="stopBtn" style="display:none;">Stop</button>
   </div>
   <div id="status">Navigate to a Facebook page, then search a keyword.</div>
-
   <div id="summary">
-    <div class="stat"><span class="num" id="totalPosts">0</span><span class="label">Posts</span></div>
-    <div class="stat"><span class="num" id="totalReactions">0</span><span class="label">Reactions</span></div>
-    <div class="stat"><span class="num" id="totalComments">0</span><span class="label">Comments</span></div>
-    <div class="stat"><span class="num" id="totalShares">0</span><span class="label">Shares</span></div>
+    <div class="stat"><span class="num" id="totalPosts">0</span><span class="label">Posts Found</span></div>
   </div>
-
   <div id="results"><div class="empty">No results yet.</div></div>
-
   <script src="popup.js"></script>
 </body>
 </html>

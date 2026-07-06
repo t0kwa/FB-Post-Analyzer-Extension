@@ -3,7 +3,7 @@
   "name": "FB Page Keyword Analytics",
   "version": "1.0.0",
   "description": "Search posts on a Facebook page you're viewing by keyword and see aggregated reaction, comment, and share counts.",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "tabs"],
   "host_permissions": [
     "https://www.facebook.com/*",
     "https://facebook.com/*",
