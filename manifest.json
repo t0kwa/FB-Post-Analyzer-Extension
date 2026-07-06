@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "FB Page Keyword Analytics",
+  "version": "1.0.0",
+  "description": "Search posts on a Facebook page you're viewing by keyword and see aggregated reaction, comment, and share counts.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["https://www.facebook.com/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "FB Keyword Analytics"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.facebook.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

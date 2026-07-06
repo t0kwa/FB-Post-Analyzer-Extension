@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>FB Keyword Analytics</title>
+  <style>
+    body {
+      width: 360px;
+      font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      margin: 0;
+      padding: 12px;
+      background: #f0f2f5;
+      color: #1c1e21;
+    }
+    h1 {
+      font-size: 15px;
+      margin: 0 0 10px;
+    }
+    .row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    input[type="text"] {
+      flex: 1;
+      padding: 8px 10px;
+      border: 1px solid #ccd0d5;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    button {
+      background: #1877f2;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button:hover { background: #166fe5; }
+    button.secondary {
+      background: #e4e6eb;
+      color: #1c1e21;
+    }
+    button.secondary:hover { background: #d8dade; }
+    #status {
+      font-size: 12px;
+      color: #65676b;
+      margin-bottom: 10px;
+      min-height: 14px;
+    }
+    #summary {
+      background: white;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+      display: none;
+    }
+    #summary .stat {
+      display: inline-block;
+      width: 32%;
+      text-align: center;
+    }
+    #summary .stat .num {
+      font-weight: 700;
+      font-size: 16px;
+      display: block;
+    }
+    #summary .stat .label {
+      font-size: 11px;
+      color: #65676b;
+    }
+    #results {
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .post-card {
+      background: white;
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .post-card .snippet {
+      margin-bottom: 6px;
+      line-height: 1.35;
+      color: #1c1e21;
+    }
+    .post-card .metrics {
+      display: flex;
+      gap: 10px;
+      color: #65676b;
+      font-size: 11px;
+    }
+    .empty {
+      text-align: center;
+      color: #65676b;
+      font-size: 12px;
+      padding: 20px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>FB Page Keyword Analytics</h1>
+  <div class="row">
+    <input type="text" id="keyword" placeholder="Enter keyword..." />
+    <button id="searchBtn">Search</button>
+  </div>
+  <div class="row">
+    <button class="secondary" id="rescanBtn" style="flex:1;">Quick scan (visible posts only)</button>
+  </div>
+  <div class="row">
+    <button id="autoScanBtn" style="flex:1;">▶ Auto-scan (scroll &amp; collect)</button>
+    <button class="secondary" id="stopBtn" style="display:none;">Stop</button>
+  </div>
+  <div id="status">Navigate to a Facebook page, then search a keyword.</div>
+
+  <div id="summary">
+    <div class="stat"><span class="num" id="totalPosts">0</span><span class="label">Posts</span></div>
+    <div class="stat"><span class="num" id="totalReactions">0</span><span class="label">Reactions</span></div>
+    <div class="stat"><span class="num" id="totalComments">0</span><span class="label">Comments</span></div>
+    <div class="stat"><span class="num" id="totalShares">0</span><span class="label">Shares</span></div>
+  </div>
+
+  <div id="results"><div class="empty">No results yet.</div></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
