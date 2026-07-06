@@ -4,16 +4,27 @@
   "version": "1.0.0",
   "description": "Search posts on a Facebook page you're viewing by keyword and see aggregated reaction, comment, and share counts.",
   "permissions": ["activeTab", "scripting"],
-  "host_permissions": ["https://www.facebook.com/*"],
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "https://facebook.com/*",
+    "https://m.facebook.com/*",
+    "https://web.facebook.com/*"
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "FB Keyword Analytics"
   },
   "content_scripts": [
     {
-      "matches": ["https://www.facebook.com/*"],
+      "matches": [
+        "https://www.facebook.com/*",
+        "https://facebook.com/*",
+        "https://m.facebook.com/*",
+        "https://web.facebook.com/*"
+      ],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ]
 }

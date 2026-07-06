@@ -20,6 +20,15 @@ function parseAbbreviatedNumber(str) {
   return Math.round(num);
 }
 
+// Prefer visible text where possible (innerText) but fall back to textContent.
+function getVisibleText(node) {
+  try {
+    return (node.innerText || node.textContent || "").trim();
+  } catch (e) {
+    return (node.textContent || "").trim();
+  }
+}
+
 // Extracts the reaction count. Facebook usually exposes this via an
 // aria-label like "Like: 1.2K people" or a span whose text is just a number.
 function extractReactions(article) {
@@ -34,10 +43,11 @@ function extractReactions(article) {
   // Fallback: look for a span near "reactions" text
   const spans = article.querySelectorAll("span");
   for (const s of spans) {
-    if (/^[\d.,]+[KkMmBb]?$/.test(s.textContent.trim())) {
+    const txt = (s.innerText || s.textContent || "").trim();
+    if (/^[\d.,]+[KkMmBb]?$/.test(txt)) {
       const parent = s.closest('[role="button"]');
       if (parent && /reaction|like/i.test(parent.getAttribute("aria-label") || "")) {
-        return parseAbbreviatedNumber(s.textContent.trim());
+        return parseAbbreviatedNumber(txt);
       }
     }
   }
@@ -48,8 +58,8 @@ function extractReactions(article) {
 function extractCountByLabel(article, labelRegex) {
   const spans = article.querySelectorAll("span, div");
   for (const el of spans) {
-    const text = el.textContent.trim();
-    if (labelRegex.test(text) && text.length < 40) {
+    const text = (el.innerText || el.textContent || "").trim();
+    if (labelRegex.test(text) && text.length < 80) {
       const m = text.match(/([\d.,]+[KkMmBb]?)/);
       if (m) return parseAbbreviatedNumber(m[1]);
     }
@@ -61,10 +71,10 @@ function getPostSnippet(article) {
   const textBlocks = article.querySelectorAll('[data-ad-preview="message"], [dir="auto"]');
   let text = "";
   for (const block of textBlocks) {
-    const t = block.textContent.trim();
+    const t = (block.innerText || block.textContent || "").trim();
     if (t.length > text.length) text = t;
   }
-  if (!text) text = article.textContent.trim();
+  if (!text) text = getVisibleText(article);
   text = text.replace(/\s+/g, " ");
   return text.length > 160 ? text.slice(0, 160) + "…" : text;
 }
@@ -90,14 +100,27 @@ function extractPostData(article) {
 }
 
 // --- One-shot scan (scans only what's currently loaded) ------------------
+const POST_SELECTOR = 'div[role="article"], article, div[data-pagelet^="FeedUnit_"], div[aria-posinset]';
 
 function scanPosts(keyword) {
-  const articles = Array.from(document.querySelectorAll('div[role="article"]'));
-  const lowerKeyword = keyword.toLowerCase();
+  // Broader selector: include aria-posinset which Facebook sometimes uses
+  const articles = Array.from(document.querySelectorAll(POST_SELECTOR));
+  const lowerKeyword = (keyword || "").toLowerCase();
   const matched = [];
 
+  // Debug: show how many candidate articles we scanned and the keyword
+  try {
+    console.debug(`FB-KW: scanPosts keyword="${String(keyword)}" candidates=${articles.length}`);
+    for (let i = 0; i < Math.min(5, articles.length); i++) {
+      const sample = getVisibleText(articles[i]).slice(0, 200).replace(/\n/g, " ");
+      console.debug(`FB-KW: sample[${i}]= ${sample}`);
+    }
+  } catch (e) {
+    console.debug("FB-KW: scanPosts debug failed", e);
+  }
+
   for (const article of articles) {
-    const rawText = article.textContent || "";
+    const rawText = getVisibleText(article);
     if (!rawText.toLowerCase().includes(lowerKeyword)) continue;
     matched.push(extractPostData(article));
   }
@@ -106,9 +129,15 @@ function scanPosts(keyword) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "PING") {
+    sendResponse({ alive: true });
+    return true;
+  }
   if (request.action === "SEARCH_KEYWORD") {
     try {
+      console.debug("FB-KW: SEARCH_KEYWORD received", request.keyword);
       const result = scanPosts(request.keyword);
+      console.debug(`FB-KW: SEARCH_KEYWORD result posts=${result.posts.length} scanned=${result.scanned}`);
       sendResponse(result);
     } catch (err) {
       sendResponse({ posts: [], scanned: 0, error: String(err) });
@@ -164,10 +193,16 @@ chrome.runtime.onConnect.addListener((port) => {
     port.postMessage({ type: "STATUS", message: "Starting scan…" });
 
     for (let i = 0; i < AUTO_SCAN.MAX_ITERATIONS && !stopped; i++) {
-      const articles = Array.from(document.querySelectorAll('div[role="article"]'));
+      // Use same broader selector and visible text in auto-scan
+      const articles = Array.from(document.querySelectorAll(POST_SELECTOR));
+
+      // Debug: log iteration and candidate count
+      try {
+        console.debug(`FB-KW: runAutoScan iter=${i + 1} candidates=${articles.length} found=${foundPosts.length}`);
+      } catch (e) {}
 
       for (const article of articles) {
-        const rawText = (article.textContent || "").toLowerCase();
+        const rawText = getVisibleText(article).toLowerCase();
         if (!rawText.includes(keyword)) continue;
 
         const data = extractPostData(article);
@@ -209,7 +244,7 @@ chrome.runtime.onConnect.addListener((port) => {
           type: "DONE",
           reason: "Reached the end of the loaded page.",
           posts: foundPosts,
-          scanned: document.querySelectorAll('div[role="article"]').length,
+          scanned: document.querySelectorAll(POST_SELECTOR).length,
         });
         return;
       }
@@ -219,7 +254,7 @@ chrome.runtime.onConnect.addListener((port) => {
       type: "DONE",
       reason: stopped ? "Stopped." : "Reached the scan limit for this run.",
       posts: foundPosts,
-      scanned: document.querySelectorAll('div[role="article"]').length,
+      scanned: document.querySelectorAll(POST_SELECTOR).length,
     });
   }
 });

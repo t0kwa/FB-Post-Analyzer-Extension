@@ -57,6 +57,22 @@ async function getActiveTab() {
   return tab;
 }
 
+// Confirms the content script is actually alive in the tab before we try to
+// use it. Fixes the confusing "Could not establish connection" case, which
+// usually means the tab was open before the extension was (re)loaded and
+// needs a refresh.
+function pingContentScript(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { action: "PING" }, (response) => {
+      if (chrome.runtime.lastError || !response) {
+        resolve(false);
+      } else {
+        resolve(true);
+      }
+    });
+  });
+}
+
 function setScanningUI(isScanning) {
   autoScanBtn.style.display = isScanning ? "none" : "inline-block";
   stopBtn.style.display = isScanning ? "inline-block" : "none";
@@ -70,6 +86,14 @@ async function runQuickScan(keyword) {
   const tab = await getActiveTab();
   if (!tab || !tab.url || !tab.url.includes("facebook.com")) {
     statusEl.textContent = "Please open a Facebook page tab first.";
+    return;
+  }
+
+  statusEl.textContent = "Checking connection to the page...";
+  const alive = await pingContentScript(tab.id);
+  if (!alive) {
+    statusEl.textContent =
+      "⚠️ Can't reach the page. Refresh the Facebook tab (F5) — this usually happens right after installing/updating the extension — then try again.";
     return;
   }
 
@@ -103,6 +127,14 @@ async function startAutoScan(keyword) {
     return;
   }
 
+  statusEl.textContent = "Checking connection to the page...";
+  const alive = await pingContentScript(tab.id);
+  if (!alive) {
+    statusEl.textContent =
+      "⚠️ Can't reach the page. Refresh the Facebook tab (F5) — this usually happens right after installing/updating the extension — then try again.";
+    return;
+  }
+
   setScanningUI(true);
   statusEl.textContent = "Starting auto-scan…";
 
@@ -123,6 +155,10 @@ async function startAutoScan(keyword) {
   });
 
   activePort.onDisconnect.addListener(() => {
+    if (chrome.runtime.lastError) {
+      statusEl.textContent =
+        "⚠️ Lost connection to the page. Refresh the Facebook tab and try again.";
+    }
     activePort = null;
     setScanningUI(false);
   });
