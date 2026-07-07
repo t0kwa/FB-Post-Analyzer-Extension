@@ -1,4 +1,4 @@
-// popup.js - Shows accumulating posts
+// popup.js - With click navigation
 
 const keywordInput = document.getElementById('keyword');
 const searchBtn = document.getElementById('searchBtn');
@@ -14,7 +14,6 @@ const scanInfoEl = document.getElementById('scanInfo');
 let isScanning = false;
 let shouldStop = false;
 let allPosts = [];
-let totalFound = 0;
 
 function setStatus(message, type = 'idle') {
   statusEl.textContent = message;
@@ -30,7 +29,7 @@ function renderPosts(posts) {
       <div class="empty">
         <span class="icon">🔍</span>
         No matching posts found yet
-        <div class="sub">Scrolling will find more posts...</div>
+        <div class="sub">Try a different keyword or scroll down</div>
       </div>
     `;
     return;
@@ -39,9 +38,8 @@ function renderPosts(posts) {
   postCountEl.textContent = posts.length;
   statsEl.style.display = 'block';
   
-  // Show ALL accumulated posts
   resultsEl.innerHTML = posts.map((p, i) => `
-    <div class="post" data-url="${p.url || ''}" data-index="${i}">
+    <div class="post" data-url="${p.url || ''}" data-text="${encodeURIComponent(p.text || '')}" data-index="${i}">
       <div class="text">${p.snippet || 'No description'}</div>
       <div class="metrics">
         <span>❤️ ${(p.reactions || 0).toLocaleString()}</span>
@@ -61,13 +59,6 @@ async function doSearch(keyword, isAuto = false) {
   keyword = keyword.trim();
   
   if (!isAuto) {
-    // Reset accumulated posts for new manual search
-    totalFound = 0;
-    try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      await chrome.tabs.sendMessage(tab.id, { action: 'CLEAR_ACCUMULATED' });
-    } catch (e) {}
-    
     setStatus('🔍 Searching for "' + keyword + '"...', 'loading');
     searchBtn.disabled = true;
   }
@@ -81,7 +72,6 @@ async function doSearch(keyword, isAuto = false) {
       return;
     }
     
-    // Check if content script is alive
     try {
       await chrome.tabs.sendMessage(tab.id, { action: 'PING' });
     } catch (e) {
@@ -90,7 +80,6 @@ async function doSearch(keyword, isAuto = false) {
       return;
     }
     
-    // Send search with isAuto flag
     const response = await chrome.tabs.sendMessage(tab.id, {
       action: 'SEARCH_KEYWORD',
       keyword: keyword,
@@ -134,12 +123,10 @@ async function startAutoScan() {
     return;
   }
   
-  // Reset accumulated posts for new auto-scan
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     await chrome.tabs.sendMessage(tab.id, { action: 'CLEAR_ACCUMULATED' });
   } catch (e) {}
-  totalFound = 0;
   
   isScanning = true;
   shouldStop = false;
@@ -153,53 +140,47 @@ async function startAutoScan() {
   let iteration = 0;
   const maxScans = 30;
   let noNewPostsCount = 0;
+  let prevCount = 0;
   
   while (!shouldStop && iteration < maxScans) {
     iteration++;
     
-    // Search current view - this will accumulate posts
     await doSearch(keyword, true);
     
-    // Check if we found new posts
-    if (allPosts.length > totalFound) {
-      totalFound = allPosts.length;
+    if (allPosts.length > prevCount) {
+      prevCount = allPosts.length;
       noNewPostsCount = 0;
-      setStatus(`Found ${totalFound} posts so far (scan ${iteration})`, 'loading');
+      setStatus(`Found ${prevCount} posts so far (scan ${iteration})`, 'loading');
     } else {
       noNewPostsCount++;
-      if (noNewPostsCount > 3 && iteration > 5) {
-        setStatus(`No new posts found in last ${noNewPostsCount} scans. Total: ${totalFound}`, 'info');
+      if (noNewPostsCount > 5 && iteration > 5) {
+        setStatus(`No new posts. Total: ${prevCount} (scan ${iteration})`, 'info');
       }
     }
     
-    // Scroll down
     try {
       await chrome.tabs.sendMessage(tab.id, { action: 'SCROLL_DOWN' });
     } catch (e) {}
     
-    // Wait for content to load
     await new Promise(r => setTimeout(r, 1500));
     
-    // Check if at bottom
     try {
       const result = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => window.innerHeight + window.scrollY >= document.body.scrollHeight - 100
       });
       
-      if (result && result[0] && result[0].result) {
-        if (iteration > 5 && noNewPostsCount > 2) {
-          setStatus(`✅ Reached bottom! Found ${totalFound} posts`, 'success');
-          break;
-        }
+      if (result && result[0] && result[0].result && noNewPostsCount > 3) {
+        setStatus(`✅ Reached bottom! Found ${prevCount} posts`, 'success');
+        break;
       }
     } catch (e) {}
   }
   
   if (shouldStop) {
-    setStatus(`⏹ Stopped. Found ${totalFound} posts.`, 'info');
+    setStatus(`⏹ Stopped. Found ${prevCount} posts.`, 'info');
   } else if (iteration >= maxScans) {
-    setStatus(`⏱ Max scans reached. Found ${totalFound} posts.`, 'info');
+    setStatus(`⏱ Max scans reached. Found ${prevCount} posts.`, 'info');
   }
   
   isScanning = false;
@@ -216,7 +197,6 @@ function stopScan() {
 
 function clearResults() {
   allPosts = [];
-  totalFound = 0;
   statsEl.style.display = 'none';
   resultsEl.innerHTML = `
     <div class="empty">
@@ -228,7 +208,6 @@ function clearResults() {
   setStatus('🗑 Cleared', 'idle');
   scanInfoEl.textContent = '0 scanned';
   
-  // Also clear in content script
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (tabs[0]) {
       chrome.tabs.sendMessage(tabs[0].id, { action: 'CLEAR_ACCUMULATED' });
@@ -236,25 +215,55 @@ function clearResults() {
   });
 }
 
-// Click post to open
+// Click post to open - UPDATED
 resultsEl.addEventListener('click', async (e) => {
   const post = e.target.closest('.post');
   if (!post) return;
   
   const url = post.getAttribute('data-url');
-  if (!url || url === window.location.href) {
-    setStatus('No valid URL for this post', 'error');
-    return;
+  const text = decodeURIComponent(post.getAttribute('data-text') || '');
+  
+  console.log('[FB-KW] Clicked post:', { url, text: text.slice(0, 100) });
+  
+  // If we have a URL that's not the current page, use it
+  if (url && url !== window.location.href && url.includes('/posts/')) {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab) {
+        await chrome.tabs.update(tab.id, { url });
+        setStatus('📄 Opening post...', 'info');
+        return;
+      }
+    } catch (error) {
+      console.error('[FB-KW] Navigation error:', error);
+    }
   }
   
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab) {
-      await chrome.tabs.update(tab.id, { url });
-      setStatus('📄 Opening post...', 'info');
+  // If URL didn't work, try to navigate using the content script
+  if (text) {
+    try {
+      setStatus('🔍 Finding post...', 'loading');
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      
+      const response = await chrome.tabs.sendMessage(tab.id, {
+        action: 'NAVIGATE_TO_POST',
+        postData: { text: text }
+      });
+      
+      if (response && response.success) {
+        setStatus('📄 Navigating to post...', 'info');
+        if (response.url && response.url !== window.location.href) {
+          await chrome.tabs.update(tab.id, { url: response.url });
+        }
+      } else {
+        setStatus('❌ Could not find post. Try refreshing the page.', 'error');
+      }
+    } catch (error) {
+      console.error('[FB-KW] Navigation error:', error);
+      setStatus('❌ Error: ' + error.message, 'error');
     }
-  } catch (error) {
-    setStatus('Error opening post', 'error');
+  } else {
+    setStatus('❌ No valid URL for this post', 'error');
   }
 });
 
