@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "FB Post Scraper & Exporter",
+  "name": "Facebook Post Finder & Exporter",
   "version": "4.0.0",
-  "description": "Scrape Facebook posts and export to CSV, Excel & JSON",
+  "description": "Find and export Facebook posts to CSV, Excel & JSON",
   "permissions": ["activeTab", "scripting", "storage", "downloads"],
   "host_permissions": [
     "https://www.facebook.com/*",
@@ -10,7 +10,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "FB Post Scraper"
+    "default_title": "Facebook Post Finder & Exporter"
   },
   "content_scripts": [
     {

@@ -6,7 +6,7 @@ let allScrapedPosts = [];
 let seenKeys = new Set();
 let isScraping = false;
 let currentPageName = '';
-const MAX_SCAN_LIMIT = 1000; // Maximum posts to scan (not collect)
+const MAX_SCAN_LIMIT = 1000;
 
 // Listen for messages
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -82,7 +82,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 async function scrapePosts(keyword = '') {
   console.log('[FB-SCRAPER] Scraping posts...');
   
-  // Check if we've reached max scan limit
   if (allScrapedPosts.length >= MAX_SCAN_LIMIT) {
     console.log('[FB-SCRAPER] Reached maximum scan limit:', MAX_SCAN_LIMIT);
     return {
@@ -95,14 +94,12 @@ async function scrapePosts(keyword = '') {
     };
   }
   
-  // Get page info first
   const pageInfo = getPageInfo();
   currentPageName = pageInfo.name;
   
   let containers = getPostContainers();
   console.log('[FB-SCRAPER] Found', containers.length, 'containers');
 
-  // Expand "See more" buttons
   let expandedAny = false;
   for (const c of containers) {
     if (expandSeeMore(c)) expandedAny = true;
@@ -117,7 +114,6 @@ async function scrapePosts(keyword = '') {
   const keywordLower = keyword ? cleanText(keyword).toLowerCase() : '';
 
   for (const container of containers) {
-    // Stop if we've reached max scan limit
     if (allScrapedPosts.length >= MAX_SCAN_LIMIT) {
       console.log('[FB-SCRAPER] Stopping - reached max scan limit');
       break;
@@ -129,18 +125,15 @@ async function scrapePosts(keyword = '') {
       
       scannedCount++;
       
-      // If keyword is specified, check if post contains the keyword
       if (keywordLower) {
         const textLower = postData.text.toLowerCase();
-        // Also check full text and author name
         const fullTextLower = (postData.fullText || '').toLowerCase();
         const authorLower = (postData.authorName || '').toLowerCase();
         
-        // Check if keyword is in text, full text, or author name
         if (!textLower.includes(keywordLower) && 
             !fullTextLower.includes(keywordLower) && 
             !authorLower.includes(keywordLower)) {
-          continue; // Skip this post if keyword not found
+          continue;
         }
       }
 
@@ -169,78 +162,67 @@ async function scrapePosts(keyword = '') {
 }
 
 // ============================================
-// EXTRACT FULL POST DATA - IMPROVED
+// EXTRACT FULL POST DATA
 // ============================================
 function extractFullPostData(container, pageInfo) {
   const fullText = cleanText(container.innerText || '');
   if (!fullText || fullText.length < 20) return null;
 
-  // Get post text/description
   let text = getCaptionText(container) || collapseRepeats(fullText);
   
-  // Get URL and ID
   let url = getPermalink(container);
   let postId = extractPostId(url || '');
 
-  // Extract engagement metrics
+  // If no post ID found, try to get from container attributes
+  if (!postId) {
+    const dataAttrs = ['data-story-id', 'data-post-id', 'data-ft'];
+    for (const attr of dataAttrs) {
+      const val = container.getAttribute(attr);
+      if (val) {
+        const match = val.match(/(\d+)/);
+        if (match) {
+          postId = match[1];
+          break;
+        }
+      }
+    }
+  }
+
   const reactions = extractEngagementMetric(container, fullText, 'reactions');
   const comments = extractEngagementMetric(container, fullText, 'comments');
   const shares = extractEngagementMetric(container, fullText, 'shares');
-
-  // Get timestamp
   const timestamp = extractTimestamp(container);
-
-  // Get image URLs
   const images = extractImages(container);
-
-  // Get author info
   const author = extractAuthor(container);
 
-  const postData = {
-    // Core fields
+  return {
     postId: postId || '',
     url: url || window.location.href,
     text: text || '',
     timestamp: timestamp || '',
-    
-    // Engagement metrics
     reactions: reactions,
     comments: comments,
     shares: shares,
-    
-    // Author info
     authorName: author.name || '',
     authorUrl: author.url || '',
-    
-    // Page info
     pageName: pageInfo.name || '',
     pageUrl: pageInfo.url || '',
-    
-    // Media
     images: images || [],
-    
-    // Metadata
     scrapedAt: new Date().toISOString(),
     fullText: fullText.slice(0, 2000)
   };
-
-  return postData;
 }
 
 // ============================================
-// IMPROVED ENGAGEMENT METRIC EXTRACTION
+// ENGAGEMENT METRIC EXTRACTION
 // ============================================
 function extractEngagementMetric(container, fullText, type) {
-  // Try multiple strategies to get engagement numbers
-  
-  // Strategy 1: Look for specific aria-labels or data attributes
   const selectors = {
     reactions: [
       '[aria-label*="reaction" i]',
       '[aria-label*="like" i]',
       'span[data-ad-rendering-role="like_count"]',
-      'span[data-testid="UFILikeCount"]',
-      'span:has(> span:contains("reactions"))'
+      'span[data-testid="UFILikeCount"]'
     ],
     comments: [
       '[aria-label*="comment" i]',
@@ -255,7 +237,6 @@ function extractEngagementMetric(container, fullText, type) {
     ]
   };
   
-  // Try selector-based extraction
   for (const selector of selectors[type] || []) {
     try {
       const elements = container.querySelectorAll(selector);
@@ -267,13 +248,11 @@ function extractEngagementMetric(container, fullText, type) {
     } catch (e) {}
   }
   
-  // Strategy 2: Regex on full text
   const patterns = {
     reactions: [
       /([\d,.]+[KkMmBb]?)\s*(?:reactions?|likes?)/i,
       /([\d,.]+[KkMmBb]?)\s*❤️/i,
-      /([\d,.]+[KkMmBb]?)\s*👍/i,
-      /^([\d,.]+[KkMmBb]?)\s*$/i
+      /([\d,.]+[KkMmBb]?)\s*👍/i
     ],
     comments: [
       /([\d,.]+[KkMmBb]?)\s*comments?/i,
@@ -293,40 +272,14 @@ function extractEngagementMetric(container, fullText, type) {
     }
   }
   
-  // Strategy 3: Look for number spans near the engagement type
-  const spans = container.querySelectorAll('span, div');
-  let foundText = '';
-  for (const span of spans) {
-    const spanText = cleanText(span.innerText || span.textContent || '');
-    if (spanText && spanText.length < 20) {
-      const lowerSpan = spanText.toLowerCase();
-      if (lowerSpan.includes(type.slice(0, -1)) || 
-          (type === 'reactions' && lowerSpan.includes('like')) ||
-          (type === 'reactions' && lowerSpan.includes('❤️')) ||
-          (type === 'comments' && lowerSpan.includes('💬')) ||
-          (type === 'shares' && lowerSpan.includes('↗️'))) {
-        foundText = spanText;
-        break;
-      }
-    }
-  }
-  
-  if (foundText) {
-    const num = parseEngagementNumber(foundText);
-    if (num > 0) return num;
-  }
-  
   return 0;
 }
 
 function parseEngagementNumber(text) {
   if (!text) return 0;
-  
-  // Remove non-numeric characters except commas, dots, K, M, B
   const clean = text.replace(/[^0-9.,KkMmBb]/g, '');
   if (!clean) return 0;
   
-  // Parse with K/M/B suffixes
   const match = clean.match(/^([\d,.]+)\s*([KkMmBb])?/);
   if (!match) return 0;
   
@@ -342,12 +295,11 @@ function parseEngagementNumber(text) {
 }
 
 // ============================================
-// IMPROVED POST CONTAINER DETECTION
+// POST CONTAINER DETECTION
 // ============================================
 function getPostContainers() {
   let allPosts = [];
   
-  // Strategy 1: role="article" (most reliable)
   const articles = document.querySelectorAll('[role="article"]');
   for (const article of articles) {
     if (!isComment(article) && article.innerText.length > 50) {
@@ -355,14 +307,11 @@ function getPostContainers() {
     }
   }
   
-  // Strategy 2: Facebook feed units
   const feedUnits = document.querySelectorAll('[data-pagelet*="FeedUnit"], [data-pagelet*="feed"]');
   for (const unit of feedUnits) {
     if (!isComment(unit) && unit.innerText.length > 50) {
-      // Check if this contains multiple articles
       const childArticles = unit.querySelectorAll('[role="article"]');
       if (childArticles.length > 1) {
-        // Add each child article
         for (const child of childArticles) {
           if (!isComment(child) && child.innerText.length > 50) {
             allPosts.push(child);
@@ -374,7 +323,6 @@ function getPostContainers() {
     }
   }
   
-  // Strategy 3: Look for posts by action buttons
   const actionButtons = document.querySelectorAll(
     '[data-ad-rendering-role="like_button"], ' +
     '[data-ad-rendering-role="comment_button"], ' +
@@ -384,7 +332,6 @@ function getPostContainers() {
   for (const btn of actionButtons) {
     let container = btn.closest('[role="article"]');
     if (!container) {
-      // Find the nearest container with lots of text
       let parent = btn.parentElement;
       while (parent && parent !== document.body) {
         if (parent.innerText && parent.innerText.length > 100) {
@@ -399,7 +346,6 @@ function getPostContainers() {
     }
   }
   
-  // Strategy 4: Look for story containers
   const stories = document.querySelectorAll(
     '[data-testid="post_container"], ' +
     '[data-testid="fbfeed_story"], ' +
@@ -413,7 +359,6 @@ function getPostContainers() {
     }
   }
   
-  // Remove duplicates and nested containers
   const uniquePosts = [];
   for (const post of allPosts) {
     let isNested = false;
@@ -433,15 +378,13 @@ function getPostContainers() {
 }
 
 // ============================================
-// EXTRACT AUTHOR INFO - IMPROVED
+// EXTRACT AUTHOR INFO
 // ============================================
 function extractAuthor(container) {
-  // Look for author name links with profile URLs
   const links = container.querySelectorAll('a[href*="facebook.com"]');
   
   for (const link of links) {
     const href = link.href || '';
-    // Skip post links and navigation links
     if (href.includes('/posts/') || 
         href.includes('/photos/') || 
         href.includes('/videos/') ||
@@ -454,36 +397,24 @@ function extractAuthor(container) {
     
     const text = cleanText(link.innerText || link.textContent || '');
     if (text && text.length > 2 && text.length < 100) {
-      // Check if it's likely a name
       if (!text.includes('facebook') && 
           !text.includes('profile') && 
           !text.includes('page') &&
           !text.match(/^[\d,.]/)) {
-        return {
-          name: text,
-          url: href
-        };
+        return { name: text, url: href };
       }
     }
   }
   
-  // Fallback: Look for strong text that might be the author name
   const strong = container.querySelectorAll('strong, b, h3, h4, h5');
   for (const el of strong) {
     const text = cleanText(el.innerText || el.textContent || '');
     if (text && text.length > 2 && text.length < 100 && !text.match(/^[\d,.]/)) {
-      // Check if there's a link nearby
       const nearbyLink = el.closest('a');
       if (nearbyLink) {
-        return {
-          name: text,
-          url: nearbyLink.href || ''
-        };
+        return { name: text, url: nearbyLink.href || '' };
       }
-      return {
-        name: text,
-        url: ''
-      };
+      return { name: text, url: '' };
     }
   }
   
@@ -491,7 +422,7 @@ function extractAuthor(container) {
 }
 
 // ============================================
-// EXTRACT TIMESTAMP - IMPROVED
+// EXTRACT TIMESTAMP
 // ============================================
 function extractTimestamp(container) {
   const timeSelectors = [
@@ -500,28 +431,21 @@ function extractTimestamp(container) {
     '[data-testid="post_timestamp"]',
     '[aria-label*="hour" i]',
     '[aria-label*="minute" i]',
-    '[aria-label*="day" i]',
-    'span:has(> a:contains("hour"))',
-    'span:has(> a:contains("minute"))'
+    '[aria-label*="day" i]'
   ];
   
   for (const selector of timeSelectors) {
     try {
       const elements = container.querySelectorAll(selector);
       for (const el of elements) {
-        // Check datetime attribute first
         const datetime = el.getAttribute('datetime') || '';
-        if (datetime) {
-          return datetime;
-        }
+        if (datetime) return datetime;
         
-        // Check aria-label
         const label = el.getAttribute('aria-label') || '';
         if (label && (label.includes('hour') || label.includes('minute') || label.includes('day'))) {
           return label;
         }
         
-        // Check text content
         const text = cleanText(el.innerText || el.textContent || '');
         if (text && (text.includes('hour') || text.includes('minute') || text.includes('day') || 
             text.includes('ago') || text.includes('at') || text.match(/\d{1,2}:\d{2}/))) {
@@ -531,28 +455,23 @@ function extractTimestamp(container) {
     } catch (e) {}
   }
   
-  // Look for relative time text
   const allText = container.innerText || '';
   const timeMatch = allText.match(/(\d+\s*(?:hour|minute|day|week|month|year)s?\s*ago)/i);
-  if (timeMatch) {
-    return timeMatch[1];
-  }
+  if (timeMatch) return timeMatch[1];
   
   return '';
 }
 
 // ============================================
-// EXTRACT IMAGES - IMPROVED
+// EXTRACT IMAGES
 // ============================================
 function extractImages(container) {
   const images = [];
   const seen = new Set();
   
-  // Look for img tags
   const imgElements = container.querySelectorAll('img');
   for (const img of imgElements) {
     const src = img.src || '';
-    // Filter out icons, logos, and tiny images
     if (src && 
         !src.includes('logo') && 
         !src.includes('icon') && 
@@ -566,7 +485,6 @@ function extractImages(container) {
     }
   }
   
-  // Look for background images
   const divs = container.querySelectorAll('div[style*="background-image"]');
   for (const div of divs) {
     const style = div.getAttribute('style') || '';
@@ -577,16 +495,15 @@ function extractImages(container) {
     }
   }
   
-  return images.slice(0, 10); // Limit to 10 images
+  return images.slice(0, 10);
 }
 
 // ============================================
-// GET PERMALINK - IMPROVED
+// GET PERMALINK
 // ============================================
 function getPermalink(container) {
   const links = container.querySelectorAll('a[href]');
   
-  // Priority 1: Links with "post" or "story" in them
   for (const a of links) {
     const href = a.href || '';
     if (href && (href.includes('/posts/') || 
@@ -597,7 +514,6 @@ function getPermalink(container) {
     }
   }
   
-  // Priority 2: Links with timestamp in them
   for (const a of links) {
     const href = a.href || '';
     if (href && (a.querySelector('time') || a.querySelector('abbr') || a.querySelector('[datetime]'))) {
@@ -605,7 +521,6 @@ function getPermalink(container) {
     }
   }
   
-  // Priority 3: Any Facebook link that's not a profile or page
   for (const a of links) {
     const href = a.href || '';
     if (href && href.includes('facebook.com') && 
@@ -618,7 +533,171 @@ function getPermalink(container) {
 }
 
 // ============================================
-// REMAINING HELPER FUNCTIONS
+// NAVIGATE TO POST - FIXED
+// ============================================
+function navigateToPost(postData) {
+  console.log('[FB-SCRAPER] Navigating to post:', postData);
+  
+  // Strategy 1: Direct URL navigation (most reliable)
+  if (postData.url && postData.url.includes('facebook.com')) {
+    // Check if it's a valid post URL
+    if (postData.url.includes('/posts/') || 
+        postData.url.includes('/permalink/') || 
+        postData.url.includes('story_fbid=') ||
+        postData.url.includes('/photos/') ||
+        postData.url.includes('/videos/')) {
+      console.log('[FB-SCRAPER] Opening post URL directly:', postData.url);
+      window.location.href = postData.url;
+      return { success: true, method: 'url', url: postData.url };
+    }
+    
+    // If it's just a page URL, try to find the actual post
+    console.log('[FB-SCRAPER] URL is page URL, searching for post...');
+  }
+
+  // Strategy 2: Find by text content
+  if (postData.text) {
+    console.log('[FB-SCRAPER] Searching for post by text...');
+    const element = findPostElementByText(postData.text);
+    if (element) {
+      console.log('[FB-SCRAPER] Found element by text');
+      
+      // Try to find post link
+      const link = element.querySelector('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="/photos/"], a[href*="/videos/"]');
+      if (link && link.href) {
+        console.log('[FB-SCRAPER] Found post link:', link.href);
+        window.location.href = link.href;
+        return { success: true, method: 'link', url: link.href };
+      }
+      
+      // Try to find any link with Facebook URL
+      const anyLink = element.querySelector('a[href*="facebook.com"]');
+      if (anyLink && anyLink.href && 
+          !anyLink.href.match(/facebook\.com\/[^\/?]+$/) &&
+          !anyLink.href.includes('/profile.php')) {
+        console.log('[FB-SCRAPER] Found Facebook link:', anyLink.href);
+        window.location.href = anyLink.href;
+        return { success: true, method: 'link', url: anyLink.href };
+      }
+      
+      // Click the element as last resort
+      try {
+        console.log('[FB-SCRAPER] Clicking element...');
+        element.click();
+        return { success: true, method: 'click' };
+      } catch (e) {
+        console.warn('[FB-SCRAPER] Click failed:', e);
+      }
+    }
+  }
+
+  // Strategy 3: Search by post ID
+  if (postData.postId) {
+    console.log('[FB-SCRAPER] Searching for post by ID:', postData.postId);
+    const links = document.querySelectorAll('a[href*="story_fbid=' + postData.postId + '"], a[href*="/posts/' + postData.postId + '"]');
+    for (const link of links) {
+      if (link.href) {
+        console.log('[FB-SCRAPER] Found post by ID:', link.href);
+        window.location.href = link.href;
+        return { success: true, method: 'id', url: link.href };
+      }
+    }
+  }
+
+  // Strategy 4: Search by author + text
+  if (postData.authorName && postData.text) {
+    console.log('[FB-SCRAPER] Searching by author and text...');
+    const authorText = postData.authorName.slice(0, 20);
+    const postText = postData.text.slice(0, 30);
+    
+    const elements = document.querySelectorAll('div[role="article"], article');
+    for (const el of elements) {
+      const elText = el.innerText || '';
+      if (elText.includes(authorText) && elText.includes(postText)) {
+        const link = el.querySelector('a[href*="/posts/"], a[href*="/permalink/"]');
+        if (link && link.href) {
+          console.log('[FB-SCRAPER] Found post by author+text:', link.href);
+          window.location.href = link.href;
+          return { success: true, method: 'author_text', url: link.href };
+        }
+      }
+    }
+  }
+
+  console.log('[FB-SCRAPER] Could not find post');
+  return { success: false, error: 'Post not found on page' };
+}
+
+// ============================================
+// FIND POST ELEMENT BY TEXT - IMPROVED
+// ============================================
+function findPostElementByText(text) {
+  if (!text) return null;
+  
+  const searchText = text.slice(0, 50).replace(/'/g, "\\'").replace(/"/g, '\\"');
+  console.log('[FB-SCRAPER] Searching for:', searchText);
+  
+  // Try XPath
+  try {
+    const xpath = `//*[contains(text(), '${searchText}')]`;
+    const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+    const node = result.singleNodeValue;
+    if (node) {
+      let element = node;
+      while (element && element !== document.body) {
+        if (element.tagName === 'ARTICLE' || 
+            element.getAttribute('role') === 'article' ||
+            element.getAttribute('data-pagelet')?.startsWith('FeedUnit_') ||
+            element.getAttribute('data-testid') === 'post_container') {
+          return element;
+        }
+        element = element.parentElement;
+      }
+      return node;
+    }
+  } catch (e) {
+    console.warn('[FB-SCRAPER] XPath search failed:', e);
+  }
+
+  // Try finding by partial text match in post containers
+  const containers = document.querySelectorAll('div[role="article"], article, div[data-pagelet*="FeedUnit"], div[data-testid="post_container"]');
+  const searchWords = text.slice(0, 30).split(' ').filter(w => w.length > 5);
+  
+  for (const el of containers) {
+    const elText = el.innerText || el.textContent || '';
+    let matchCount = 0;
+    for (const word of searchWords) {
+      if (elText.includes(word)) matchCount++;
+    }
+    if (matchCount >= Math.min(2, searchWords.length)) {
+      return el;
+    }
+  }
+
+  // Last resort: look for any element containing the text
+  const allElements = document.querySelectorAll('div, span, p');
+  for (const el of allElements) {
+    const elText = el.innerText || el.textContent || '';
+    if (elText.includes(text.slice(0, 30)) && elText.length < 2000) {
+      let element = el;
+      while (element && element !== document.body) {
+        if (element.tagName === 'ARTICLE' || 
+            element.getAttribute('role') === 'article' ||
+            element.getAttribute('data-pagelet')?.startsWith('FeedUnit_') ||
+            element.getAttribute('data-testid') === 'post_container') {
+          return element;
+        }
+        element = element.parentElement;
+      }
+      return el;
+    }
+  }
+
+  return null;
+}
+
+// ============================================
+// HELPER FUNCTIONS
 // ============================================
 
 function isComment(el) {
@@ -659,7 +738,6 @@ function getCaptionText(container) {
     } catch (e) {}
   }
   
-  // Try to find the main text in the container
   const textEls = container.querySelectorAll('div[dir="auto"], span[dir="auto"], p');
   for (const el of textEls) {
     if (el.closest('[role="button"]')) continue;
@@ -722,9 +800,7 @@ function extractPostId(url) {
   
   for (const pattern of patterns) {
     const match = url.match(pattern);
-    if (match) {
-      return match[1];
-    }
+    if (match) return match[1];
   }
   
   return '';
@@ -734,7 +810,6 @@ function getPageInfo() {
   const url = window.location.href;
   let name = '';
   
-  // Try to get page name from the page
   const nameElements = document.querySelectorAll('h1, h2, strong, span[dir="auto"]');
   for (const el of nameElements) {
     const text = cleanText(el.innerText || el.textContent || '');
@@ -750,78 +825,10 @@ function getPageInfo() {
   
   if (!name) {
     const urlMatch = url.match(/facebook\.com\/([^/?]+)/);
-    if (urlMatch) {
-      name = urlMatch[1];
-    }
+    if (urlMatch) name = urlMatch[1];
   }
   
-  return {
-    name: name || 'Unknown Page',
-    url: url
-  };
-}
-
-function navigateToPost(postData) {
-  if (postData.url && postData.url.includes('facebook.com')) {
-    window.location.href = postData.url;
-    return { success: true, method: 'url', url: postData.url };
-  }
-
-  if (postData.text) {
-    const element = findPostElementByText(postData.text);
-    if (element) {
-      const link = element.querySelector('a[href*="/posts/"], a[href*="/photos/"], time a');
-      if (link && link.href) {
-        window.location.href = link.href;
-        return { success: true, method: 'link', url: link.href };
-      }
-      try { element.click(); return { success: true, method: 'click' }; } catch (e) {}
-    }
-  }
-
-  return { success: false, error: 'Post not found' };
-}
-
-function findPostElementByText(text) {
-  if (!text) return null;
-  const searchText = text.slice(0, 50).replace(/'/g, "\\'");
-  
-  try {
-    const xpath = `//*[contains(text(), '${searchText}')]`;
-    const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-    const node = result.singleNodeValue;
-    if (node) {
-      let element = node;
-      while (element && element !== document.body) {
-        if (element.tagName === 'ARTICLE' || 
-            element.getAttribute('role') === 'article' ||
-            element.getAttribute('data-pagelet')?.startsWith('FeedUnit_')) {
-          return element;
-        }
-        element = element.parentElement;
-      }
-      return node;
-    }
-  } catch (e) {}
-
-  const elements = document.querySelectorAll('div, span, p, article');
-  for (const el of elements) {
-    const elText = el.innerText || el.textContent || '';
-    if (elText.includes(text.slice(0, 50)) && elText.length < 2000) {
-      let element = el;
-      while (element && element !== document.body) {
-        if (element.tagName === 'ARTICLE' || 
-            element.getAttribute('role') === 'article' ||
-            element.getAttribute('data-pagelet')?.startsWith('FeedUnit_')) {
-          return element;
-        }
-        element = element.parentElement;
-      }
-      return el;
-    }
-  }
-
-  return null;
+  return { name: name || 'Unknown Page', url: url };
 }
 
 console.log('[FB-SCRAPER] Ready - Enhanced version scanning up to 1000 posts');

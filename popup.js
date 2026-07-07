@@ -51,8 +51,8 @@ function renderPosts(posts) {
       <div class="text">${p.text ? p.text.slice(0, 150) + (p.text.length > 150 ? '...' : '') : 'No text'}</div>
       <div class="metrics">
         <span>❤️ ${(p.reactions || 0).toLocaleString()}</span>
-        <span>💬 ${(p.comments || 0).toLocaleString()}</span>
-        <span>↗️ ${(p.shares || 0).toLocaleString()}</span>
+        <span>↗️ ${(p.comments || 0).toLocaleString()}</span>
+        <span>💬 ${(p.shares || 0).toLocaleString()}</span>
         <span>📅 ${p.timestamp ? p.timestamp.slice(0, 10) : ''}</span>
       </div>
     </div>
