@@ -1,16 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "FB Keyword Finder",
-  "version": "3.0.0",
-  "description": "Find posts with keywords on Facebook",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "name": "FB Post Scraper & Exporter",
+  "version": "4.0.0",
+  "description": "Scrape Facebook posts and export to CSV, Excel & JSON",
+  "permissions": ["activeTab", "scripting", "storage", "downloads"],
   "host_permissions": [
     "https://www.facebook.com/*",
     "https://facebook.com/*"
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "FB Keyword Finder"
+    "default_title": "FB Post Scraper"
   },
   "content_scripts": [
     {
