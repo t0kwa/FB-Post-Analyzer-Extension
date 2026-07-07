@@ -217,112 +217,91 @@ function extractFullPostData(container, pageInfo) {
 // ENGAGEMENT METRIC EXTRACTION
 // ============================================
 function extractEngagementMetric(container, fullText, type) {
-  const selectors = {
-    reactions: [
-      '[aria-label*="reaction" i]',
-      '[aria-label*="like" i]',
-      'span[data-ad-rendering-role="like_count"]',
-      'span[data-testid="UFILikeCount"]',
-      'div[aria-label*="reactions" i]',
-      'a[href*="/reactions/"]'
-    ],
-    comments: [
-      '[aria-label*="comment" i]',
-      '[data-ad-rendering-role="comment_count"]',
-      'span[data-testid="UFICommentLink"]',
-      'a[href*="comment" i]',
-      'a[href*="/comments/"]'
-    ],
-    shares: [
-      '[aria-label*="share" i]',
-      '[data-ad-rendering-role="share_count"]',
-      'span[data-testid="UFIShareCount"]',
-      'a[href*="share" i]'
-    ]
+  const roleSelectors = {
+    reactions: '[data-ad-rendering-role="like_button"], [data-ad-rendering-role="reaction_button"], [data-ad-rendering-role="reactions_button"], [data-ad-rendering-role="like_count"]',
+    comments: '[data-ad-rendering-role="comment_button"], [data-ad-rendering-role="comment_count"]',
+    shares: '[data-ad-rendering-role="share_button"], [data-ad-rendering-role="share_count"]'
   };
-  
-  const patterns = {
-    reactions: [
-      /([\d,.]+[KkMmBb]?)\s*(?:reactions?|likes?)/i,
-      /([\d,.]+[KkMmBb]?)\s*❤️/i,
-      /([\d,.]+[KkMmBb]?)\s*👍/i
-    ],
-    comments: [
-      /([\d,.]+[KkMmBb]?)\s*comments?/i,
-      /([\d,.]+[KkMmBb]?)\s*💬/i,
-      /^([\d,.]+[KkMmBb]?)$/
-    ],
-    shares: [
-      /([\d,.]+[KkMmBb]?)\s*shares?/i,
-      /([\d,.]+[KkMmBb]?)\s*↗️/i,
-      /([\d,.]+[KkMmBb]?)\s*share/i
-    ]
-  };
-  
-  const keywordMap = {
-    reactions: ['reaction', 'reactions', 'like', 'likes', '❤️', '👍'],
-    comments: ['comment', 'comments', '💬'],
-    shares: ['share', 'shares', '↗️']
-  };
-  
-  const candidateTexts = new Set();
-  const addText = (text) => {
-    const cleaned = cleanText(text);
-    if (cleaned) candidateTexts.add(cleaned);
-  };
-  
-  const addElementsBySelector = (selector) => {
-    try {
-      const elements = container.querySelectorAll(selector);
-      for (const el of elements) {
-        addText(el.getAttribute('aria-label') || el.innerText || el.textContent);
-      }
-    } catch (e) {}
-  };
-  
-  for (const selector of selectors[type] || []) {
-    addElementsBySelector(selector);
+
+  const selector = roleSelectors[type];
+  if (!selector) return 0;
+
+  const buttons = Array.from(container.querySelectorAll(selector));
+  let bestCount = 0;
+
+  for (const button of buttons) {
+    const count = findAdjacentEngagementCount(button);
+    if (count > bestCount) bestCount = count;
   }
-  
-  try {
-    const nodes = container.querySelectorAll('a, span, div, button');
-    for (const el of nodes) {
-      const text = cleanText(el.getAttribute('aria-label') || el.innerText || el.textContent);
-      if (!text) continue;
-      const lower = text.toLowerCase();
-      if (keywordMap[type].some(keyword => lower.includes(keyword))) {
-        candidateTexts.add(text);
-      }
-    }
-  } catch (e) {}
-  
-  const findNumber = (text) => {
-    for (const pattern of patterns[type] || []) {
-      const match = text.match(pattern);
-      if (match) {
-        const num = parseEngagementNumber(match[1]);
-        if (num > 0) return num;
-      }
-    }
-    return 0;
-  };
-  
-  for (const text of candidateTexts) {
-    const num = findNumber(text);
-    if (num > 0) return num;
+
+  if (bestCount > 0) return bestCount;
+
+  const fallback = findEngagementByIcon(container, type);
+  return fallback;
+}
+
+function findAdjacentEngagementCount(button) {
+  if (!button) return 0;
+  const parent = button.parentElement;
+  if (!parent) return 0;
+
+  const exactSpan = parent.querySelector('span');
+  if (exactSpan) {
+    const count = parseEngagementNumber(cleanText(exactSpan.innerText || exactSpan.textContent || ''));
+    if (count > 0) return count;
   }
-  
-  const lines = fullText.split('\n').map(cleanText).filter(Boolean);
-  for (const line of lines) {
-    const lower = line.toLowerCase();
-    if (keywordMap[type].some(keyword => lower.includes(keyword))) {
-      const num = findNumber(line);
-      if (num > 0) return num;
+
+  const siblingSpan = button.nextElementSibling && button.nextElementSibling.querySelector('span');
+  if (siblingSpan) {
+    const count = parseEngagementNumber(cleanText(siblingSpan.innerText || siblingSpan.textContent || ''));
+    if (count > 0) return count;
+  }
+
+  let node = button;
+  let depth = 0;
+  while (node && depth < 5) {
+    const spans = node.querySelectorAll('span');
+    for (const span of spans) {
+      const count = parseEngagementNumber(cleanText(span.innerText || span.textContent || ''));
+      if (count > 0) return count;
+    }
+    node = node.parentElement;
+    depth += 1;
+  }
+
+  const siblings = button.parentElement ? Array.from(button.parentElement.children) : [];
+  for (const sibling of siblings) {
+    if (sibling === button) continue;
+    const spans = sibling.querySelectorAll('span');
+    for (const span of spans) {
+      const count = parseEngagementNumber(cleanText(span.innerText || span.textContent || ''));
+      if (count > 0) return count;
     }
   }
-  
-  const overall = findNumber(container.innerText || '');
-  return overall > 0 ? overall : 0;
+
+  return 0;
+}
+
+function findEngagementByIcon(container, type) {
+  const iconMap = {
+    reactions: ['like', 'reaction', 'thumb', '❤️', '👍'],
+    comments: ['comment', 'reply', '💬'],
+    shares: ['share', '↗️']
+  };
+  const keywords = iconMap[type] || [];
+  const spans = Array.from(container.querySelectorAll('span'));
+
+  for (const span of spans) {
+    const text = cleanText(span.innerText || span.textContent || '');
+    if (!text) continue;
+    const lower = text.toLowerCase();
+    if (keywords.some(k => lower.includes(k))) {
+      const count = parseEngagementNumber(text);
+      if (count > 0) return count;
+    }
+  }
+
+  return 0;
 }
 
 function parseEngagementNumber(text) {
@@ -777,28 +756,47 @@ function getCaptionText(container) {
     '[data-testid="post_message"]',
     '[data-testid="status-text"]',
     '.userContent',
-    '.post_content'
+    '.post_content',
+    '.html-div',
+    '[dir="auto"]'
   ];
-  
+
   for (const selector of msgSelectors) {
     try {
-      const el = container.querySelector(selector);
-      if (el) {
-        const t = cleanText(el.innerText || el.textContent || '');
-        if (t && t.length > 10) return t;
+      const elements = Array.from(container.querySelectorAll(selector));
+      for (const el of elements) {
+        if (el.closest('[role="button"]')) continue;
+        const text = cleanText(el.innerText || el.textContent || '');
+        if (!text || text.length < 15) continue;
+        if (/see less|see more|view more|more|less/i.test(text)) continue;
+        if (/comment|share|like|reaction/i.test(text) && text.split('\n').length <= 2) continue;
+        return text;
       }
     } catch (e) {}
   }
-  
-  const textEls = container.querySelectorAll('div[dir="auto"], span[dir="auto"], p');
-  for (const el of textEls) {
-    if (el.closest('[role="button"]')) continue;
-    const t = cleanText(el.innerText || el.textContent || '');
-    if (t && t.length > 20 && !t.toLowerCase().includes('comment') && !t.toLowerCase().includes('share')) {
-      return t;
+
+  const bodyNodes = Array.from(container.querySelectorAll('div[dir="auto"]'));
+  let bestText = '';
+  for (const node of bodyNodes) {
+    if (node.closest('[role="button"]')) continue;
+    const text = cleanText(node.innerText || node.textContent || '');
+    if (!text || text.length < 15) continue;
+    if (/see less|see more|view more|more|less/i.test(text)) continue;
+    if (text.includes('http') && text.length < 60) continue;
+    if (text.length > bestText.length) {
+      bestText = text;
     }
   }
-  
+  if (bestText) return bestText;
+
+  const paragraphNodes = Array.from(container.querySelectorAll('p'));
+  for (const p of paragraphNodes) {
+    const text = cleanText(p.innerText || p.textContent || '');
+    if (text && text.length > 15 && !/see less|see more/i.test(text)) {
+      return text;
+    }
+  }
+
   return null;
 }
 

@@ -53,7 +53,6 @@ function renderPosts(posts) {
         <span>❤️ ${(p.reactions || 0).toLocaleString()}</span>
         <span>💬 ${(p.comments || 0).toLocaleString()}</span>
         <span>↗️ ${(p.shares || 0).toLocaleString()}</span>
-        <span>📅 ${p.timestamp ? p.timestamp.slice(0, 10) : ''}</span>
       </div>
     </div>
   `).join('');
