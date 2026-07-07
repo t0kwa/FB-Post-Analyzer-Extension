@@ -222,31 +222,24 @@ function extractEngagementMetric(container, fullText, type) {
       '[aria-label*="reaction" i]',
       '[aria-label*="like" i]',
       'span[data-ad-rendering-role="like_count"]',
-      'span[data-testid="UFILikeCount"]'
+      'span[data-testid="UFILikeCount"]',
+      'div[aria-label*="reactions" i]',
+      'a[href*="/reactions/"]'
     ],
     comments: [
       '[aria-label*="comment" i]',
       '[data-ad-rendering-role="comment_count"]',
       'span[data-testid="UFICommentLink"]',
-      'a[href*="comment" i]'
+      'a[href*="comment" i]',
+      'a[href*="/comments/"]'
     ],
     shares: [
       '[aria-label*="share" i]',
       '[data-ad-rendering-role="share_count"]',
-      'span[data-testid="UFIShareCount"]'
+      'span[data-testid="UFIShareCount"]',
+      'a[href*="share" i]'
     ]
   };
-  
-  for (const selector of selectors[type] || []) {
-    try {
-      const elements = container.querySelectorAll(selector);
-      for (const el of elements) {
-        const text = cleanText(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
-        const num = parseEngagementNumber(text);
-        if (num > 0) return num;
-      }
-    } catch (e) {}
-  }
   
   const patterns = {
     reactions: [
@@ -256,23 +249,80 @@ function extractEngagementMetric(container, fullText, type) {
     ],
     comments: [
       /([\d,.]+[KkMmBb]?)\s*comments?/i,
-      /([\d,.]+[KkMmBb]?)\s*💬/i
+      /([\d,.]+[KkMmBb]?)\s*💬/i,
+      /^([\d,.]+[KkMmBb]?)$/
     ],
     shares: [
       /([\d,.]+[KkMmBb]?)\s*shares?/i,
-      /([\d,.]+[KkMmBb]?)\s*↗️/i
+      /([\d,.]+[KkMmBb]?)\s*↗️/i,
+      /([\d,.]+[KkMmBb]?)\s*share/i
     ]
   };
   
-  for (const pattern of patterns[type] || []) {
-    const match = fullText.match(pattern);
-    if (match) {
-      const num = parseEngagementNumber(match[1]);
+  const keywordMap = {
+    reactions: ['reaction', 'reactions', 'like', 'likes', '❤️', '👍'],
+    comments: ['comment', 'comments', '💬'],
+    shares: ['share', 'shares', '↗️']
+  };
+  
+  const candidateTexts = new Set();
+  const addText = (text) => {
+    const cleaned = cleanText(text);
+    if (cleaned) candidateTexts.add(cleaned);
+  };
+  
+  const addElementsBySelector = (selector) => {
+    try {
+      const elements = container.querySelectorAll(selector);
+      for (const el of elements) {
+        addText(el.getAttribute('aria-label') || el.innerText || el.textContent);
+      }
+    } catch (e) {}
+  };
+  
+  for (const selector of selectors[type] || []) {
+    addElementsBySelector(selector);
+  }
+  
+  try {
+    const nodes = container.querySelectorAll('a, span, div, button');
+    for (const el of nodes) {
+      const text = cleanText(el.getAttribute('aria-label') || el.innerText || el.textContent);
+      if (!text) continue;
+      const lower = text.toLowerCase();
+      if (keywordMap[type].some(keyword => lower.includes(keyword))) {
+        candidateTexts.add(text);
+      }
+    }
+  } catch (e) {}
+  
+  const findNumber = (text) => {
+    for (const pattern of patterns[type] || []) {
+      const match = text.match(pattern);
+      if (match) {
+        const num = parseEngagementNumber(match[1]);
+        if (num > 0) return num;
+      }
+    }
+    return 0;
+  };
+  
+  for (const text of candidateTexts) {
+    const num = findNumber(text);
+    if (num > 0) return num;
+  }
+  
+  const lines = fullText.split('\n').map(cleanText).filter(Boolean);
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    if (keywordMap[type].some(keyword => lower.includes(keyword))) {
+      const num = findNumber(line);
       if (num > 0) return num;
     }
   }
   
-  return 0;
+  const overall = findNumber(container.innerText || '');
+  return overall > 0 ? overall : 0;
 }
 
 function parseEngagementNumber(text) {
@@ -503,29 +553,31 @@ function extractImages(container) {
 // ============================================
 function getPermalink(container) {
   const links = container.querySelectorAll('a[href]');
+  const matchesPostUrl = (href) => {
+    return /\/posts\/|\/permalink\/|story_fbid=|\/story\.php|\/photos\/|\/videos\/|ft_ent_identifier=|fbid=|[\?&]id=/i.test(href);
+  };
   
   for (const a of links) {
-    const href = a.href || '';
-    if (href && (href.includes('/posts/') || 
-        href.includes('/permalink/') || 
-        href.includes('story_fbid=') ||
-        href.includes('/story.php'))) {
-      return stripTracking(href);
+    let href = a.href || '';
+    if (!href) continue;
+    if (matchesPostUrl(href)) {
+      return normalizeUrl(stripTracking(href));
     }
   }
   
   for (const a of links) {
-    const href = a.href || '';
-    if (href && (a.querySelector('time') || a.querySelector('abbr') || a.querySelector('[datetime]'))) {
-      return stripTracking(href);
+    let href = a.href || '';
+    if (!href) continue;
+    if (a.querySelector('time') || a.querySelector('abbr') || a.querySelector('[datetime]')) {
+      return normalizeUrl(stripTracking(href));
     }
   }
   
   for (const a of links) {
-    const href = a.href || '';
-    if (href && href.includes('facebook.com') && 
-        !href.match(/facebook\.com\/[^\/?]+$/)) {
-      return stripTracking(href);
+    let href = a.href || '';
+    if (!href) continue;
+    if (href.includes('facebook.com') && !href.match(/facebook\.com\/[^\/?]+$/)) {
+      return normalizeUrl(stripTracking(href));
     }
   }
   
@@ -783,6 +835,14 @@ function stripTracking(href) {
   return href.split('&__tn__')[0].split('&__cft__')[0].split('?__tn__')[0];
 }
 
+function normalizeUrl(href) {
+  try {
+    return new URL(href, window.location.href).href;
+  } catch (e) {
+    return href;
+  }
+}
+
 function normalizeForKey(text) {
   return text.replace(/\s+/g, ' ').trim().slice(0, 150);
 }
@@ -792,10 +852,13 @@ function extractPostId(url) {
   
   const patterns = [
     /story_fbid=([^&]+)/i,
-    /\/posts\/([^/?]+)/i,
-    /\/permalink\/([^/?]+)/i,
-    /\/photos\/([^/?]+)/i,
-    /\/videos\/([^/?]+)/i
+    /ft_ent_identifier=([^&]+)/i,
+    /fbid=([^&]+)/i,
+    /[\?&]id=(\d+)/i,
+    /\/posts\/([^/?&]+)/i,
+    /\/permalink\/([^/?&]+)/i,
+    /\/photos\/([^/?&]+)/i,
+    /\/videos\/([^/?&]+)/i
   ];
   
   for (const pattern of patterns) {

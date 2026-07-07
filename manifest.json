@@ -1,25 +1,34 @@
 {
   "manifest_version": 3,
-  "name": "Facebook Post Finder & Exporter",
-  "version": "4.0.0",
-  "description": "Find and export Facebook posts to CSV, Excel & JSON",
-  "permissions": ["activeTab", "scripting", "storage", "downloads"],
+  "name": "Facebook Post Scraper Pro",
+  "version": "3.0",
+  "description": "Scrape Facebook posts with UID extraction and export capabilities",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "downloads",
+    "scripting"
+  ],
   "host_permissions": [
     "https://www.facebook.com/*",
-    "https://facebook.com/*"
+    "https://facebook.com/*",
+    "https://*.facebook.com/*"
   ],
-  "action": {
-    "default_popup": "popup.html",
-    "default_title": "Facebook Post Finder & Exporter"
-  },
   "content_scripts": [
     {
-      "matches": [
-        "https://www.facebook.com/*",
-        "https://facebook.com/*"
-      ],
+      "matches": ["https://www.facebook.com/*", "https://facebook.com/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "web_accessible_resources": [{
+    "resources": ["inject.js"],
+    "matches": ["https://www.facebook.com/*", "https://facebook.com/*"]
+  }]
 }

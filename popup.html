@@ -4,27 +4,32 @@
   <meta charset="UTF-8">
   <title>Facebook Post Scraper and Finder</title>
   <style>
-    * { box-sizing: border-box; }
-    body {
-      width: 450px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      margin: 0;
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { 
+      width: 480px; 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+      background: #f0f2f5;
       padding: 16px;
-      background: #ffffff;
-      max-height: 600px;
-      overflow-y: auto;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     }
     .header {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      gap: 10px;
       margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 2px solid #1877f2;
     }
     .header h1 {
       font-size: 18px;
-      margin: 0;
       color: #1877f2;
       font-weight: 700;
+      flex: 1;
     }
     .header .badge {
       background: #1877f2;
@@ -34,214 +39,298 @@
       font-size: 11px;
       font-weight: 600;
     }
+    .page-info {
+      background: #f7f8fa;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      font-size: 13px;
+      color: #1c1e21;
+    }
+    .page-info .label {
+      color: #65676b;
+      font-size: 11px;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .page-info .name {
+      font-weight: 600;
+      margin-top: 2px;
+      word-break: break-all;
+    }
     .search-box {
       display: flex;
       gap: 8px;
-      margin-bottom: 10px;
+      margin-bottom: 12px;
     }
-    input {
+    .search-box input {
       flex: 1;
-      padding: 10px 14px;
-      border: 2px solid #e4e6eb;
-      border-radius: 8px;
-      font-size: 14px;
+      padding: 8px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 13px;
       outline: none;
     }
-    input:focus { border-color: #1877f2; }
-    button {
-      background: #1877f2;
-      color: white;
+    .search-box input:focus {
+      border-color: #1877f2;
+      box-shadow: 0 0 0 2px rgba(24,119,242,0.2);
+    }
+    .btn {
+      padding: 8px 16px;
       border: none;
-      border-radius: 8px;
-      padding: 10px 16px;
-      font-size: 14px;
+      border-radius: 6px;
+      font-size: 13px;
       font-weight: 600;
       cursor: pointer;
+      transition: all 0.2s;
       white-space: nowrap;
     }
-    button:hover { background: #166fe5; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    button.secondary { background: #e4e6eb; color: #1c1e21; }
-    button.secondary:hover { background: #d8dade; }
-    button.success { background: #28a745; }
-    button.success:hover { background: #218838; }
-    button.danger { background: #dc3545; }
-    button.danger:hover { background: #c82333; }
-    button.export { background: #17a2b8; }
-    button.export:hover { background: #138496; }
-    
+    .btn-primary {
+      background: #1877f2;
+      color: white;
+    }
+    .btn-primary:hover { background: #166fe5; }
+    .btn-primary:disabled {
+      background: #9bb7e8;
+      cursor: not-allowed;
+    }
+    .btn-success {
+      background: #42b72a;
+      color: white;
+    }
+    .btn-success:hover { background: #36a420; }
+    .btn-danger {
+      background: #e74c3c;
+      color: white;
+    }
+    .btn-danger:hover { background: #c0392b; }
+    .btn-warning {
+      background: #f39c12;
+      color: white;
+    }
+    .btn-warning:hover { background: #d68910; }
+    .btn-outline {
+      background: transparent;
+      color: #65676b;
+      border: 1px solid #d1d5db;
+    }
+    .btn-outline:hover { background: #f0f2f5; }
+    .btn-sm { padding: 4px 12px; font-size: 12px; }
+    .btn-group {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
     .status {
       padding: 8px 12px;
       border-radius: 6px;
       font-size: 13px;
-      margin-bottom: 10px;
-      min-height: 36px;
+      margin-bottom: 12px;
+      min-height: 38px;
+      display: flex;
+      align-items: center;
     }
-    .status.idle { color: #65676b; background: #f0f2f5; }
-    .status.loading { color: #1877f2; background: #e7f3ff; }
-    .status.success { color: #28a745; background: #e8f5e9; }
-    .status.error { color: #dc3545; background: #fde8e8; }
-    .status.info { color: #17a2b8; background: #e3f3f5; }
-    
+    .status.idle { background: #f0f2f5; color: #65676b; }
+    .status.loading { background: #e7f3ff; color: #1877f2; }
+    .status.success { background: #e6f7e6; color: #1e7e34; }
+    .status.error { background: #fde8e8; color: #c0392b; }
+    .status.info { background: #e8f0fe; color: #1967d2; }
     .stats {
       display: none;
-      background: #f0f2f5;
+      background: #f7f8fa;
       border-radius: 8px;
-      padding: 12px;
+      padding: 10px 12px;
       margin-bottom: 12px;
-    }
-    .stats .row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 8px;
+      font-size: 13px;
     }
     .stats .count {
-      font-size: 22px;
       font-weight: 700;
       color: #1877f2;
+      font-size: 18px;
     }
-    .stats .label { font-size: 13px; color: #65676b; }
-    
-    .export-section {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 12px;
-      flex-wrap: wrap;
-    }
-    .export-section button {
-      flex: 1;
-      padding: 8px;
+    .stats .scan-info {
+      color: #65676b;
       font-size: 12px;
+      margin-top: 4px;
     }
-    
-    .results {
-      max-height: 300px;
+    .results-container {
+      max-height: 400px;
       overflow-y: auto;
       border: 1px solid #e4e6eb;
       border-radius: 8px;
-      padding: 8px;
+      background: #fafafa;
+    }
+    .results-container::-webkit-scrollbar {
+      width: 6px;
+    }
+    .results-container::-webkit-scrollbar-track {
+      background: #f1f1f1;
+      border-radius: 3px;
+    }
+    .results-container::-webkit-scrollbar-thumb {
+      background: #c1c7cd;
+      border-radius: 3px;
     }
     .post {
-      background: white;
-      border: 1px solid #e4e6eb;
-      border-radius: 6px;
-      padding: 10px;
-      margin-bottom: 6px;
+      padding: 10px 12px;
+      border-bottom: 1px solid #e4e6eb;
       cursor: pointer;
-      transition: all 0.15s;
+      transition: background 0.15s;
     }
     .post:hover {
-      background: #f7f8fa;
-      border-color: #1877f2;
+      background: #e7f3ff;
+    }
+    .post:last-child {
+      border-bottom: none;
     }
     .post .text {
-      font-size: 12px;
-      line-height: 1.4;
+      font-size: 13px;
       color: #1c1e21;
-      margin-bottom: 4px;
+      line-height: 1.4;
+      margin-bottom: 6px;
       display: -webkit-box;
-      -webkit-line-clamp: 2;
+      -webkit-line-clamp: 3;
       -webkit-box-orient: vertical;
       overflow: hidden;
     }
     .post .metrics {
       display: flex;
       gap: 12px;
-      font-size: 11px;
-      color: #65676b;
-    }
-    .post .metrics span { display: flex; align-items: center; gap: 3px; }
-    
-    .empty {
-      text-align: center;
-      padding: 30px 20px;
-      color: #65676b;
-    }
-    .empty .icon { font-size: 36px; display: block; margin-bottom: 8px; }
-    .empty .sub { font-size: 12px; color: #a0a0a0; }
-    
-    .controls {
-      display: flex;
-      gap: 8px;
-      margin-top: 8px;
-      flex-wrap: wrap;
-    }
-    .controls button { flex: 1; padding: 8px; font-size: 12px; }
-    .hint {
-      text-align: center;
-      font-size: 11px;
-      color: #a0a0a0;
-      padding: 8px;
-      margin-top: 8px;
-      border-top: 1px solid #e4e6eb;
-    }
-    
-    .page-info {
       font-size: 12px;
       color: #65676b;
-      padding: 4px 0;
-      margin-bottom: 8px;
-      background: #f8f9fa;
-      padding: 8px;
-      border-radius: 6px;
+      flex-wrap: wrap;
     }
-    .page-info strong { color: #1c1e21; }
-    
-    ::-webkit-scrollbar { width: 4px; }
-    ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 2px; }
-    ::-webkit-scrollbar-thumb { background: #c1c7cd; border-radius: 2px; }
+    .post .metrics span {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+    }
+    .uid-badge {
+      background: #e74c3c;
+      color: white;
+      padding: 1px 8px;
+      border-radius: 10px;
+      font-size: 10px;
+      font-weight: 600;
+      margin-left: 6px;
+    }
+    .empty {
+      padding: 40px 20px;
+      text-align: center;
+      color: #65676b;
+    }
+    .empty .icon {
+      font-size: 32px;
+      display: block;
+      margin-bottom: 8px;
+    }
+    .empty .sub {
+      font-size: 12px;
+      color: #8d949e;
+      margin-top: 4px;
+    }
+    .stop-btn {
+      display: none;
+      background: #e74c3c;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .stop-btn:hover { background: #c0392b; }
+    .footer-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #e4e6eb;
+      align-items: center;
+    }
+    .export-group {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .export-group .btn {
+      padding: 4px 10px;
+      font-size: 11px;
+    }
+    .uid-export-btn {
+      background: #e74c3c;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .uid-export-btn:hover {
+      background: #c0392b;
+    }
   </style>
 </head>
 <body>
+<div class="container">
   <div class="header">
     <h1>Facebook Post Scraper and Finder</h1>
   </div>
-  
-  <div class="page-info" id="pageInfo">
-    <strong>Page:</strong> <span id="pageName">Loading...</span>
+
+  <div class="page-info">
+    <div class="label">Current Page</div>
+    <div class="name" id="pageName">Loading...</div>
   </div>
-  
+
   <div class="search-box">
-    <input type="text" id="keyword" placeholder="Filter by keyword (optional)" />
-    <button id="searchBtn">Scrape</button>
+    <input type="text" id="keyword" placeholder="Search keyword (optional)" />
+    <button class="btn btn-primary" id="searchBtn">🔍 Scrape</button>
   </div>
-  
-  <div class="status idle" id="status">Enter a keyword and click Scrape, or use Auto-Scrape</div>
-  
-  <div class="controls">
-    <button id="autoScrapeBtn" class="secondary" style="flex:1;">Auto-Scrape</button>
-    <button id="stopBtn" class="danger" style="display:none;flex:1;">Stop</button>
-    <button id="clearBtn" class="secondary" style="flex:0.5;">✕</button>
+
+  <div class="btn-group">
+    <button class="btn btn-success" id="autoScrapeBtn">🔄 Auto-Scrape</button>
+    <button class="btn btn-danger" id="stopBtn" style="display:none;">⏹ Stop</button>
+    <button class="btn btn-outline btn-sm" id="clearBtn">🗑 Clear</button>
   </div>
-  
+
+  <div class="status idle" id="status">Ready to scrape</div>
+
   <div class="stats" id="stats">
-    <div class="row">
-      <span>
-        <span class="count" id="postCount">0</span>
-        <span class="label"> posts scraped</span>
+    <div>
+      <span class="count" id="postCount">0</span> posts scraped
+      <span style="margin-left:12px;color:#e74c3c;">
+        👤 <span id="uidCount">0</span> UIDs
       </span>
-      <span class="label" id="scanInfo">0 scanned</span>
     </div>
+    <div class="scan-info" id="scanInfo">0 scanned</div>
   </div>
-  
-  <div class="export-section">
-    <button id="exportCsvBtn" class="export" style="flex:1;">📄 CSV</button>
-    <button id="exportJsonBtn" class="export" style="flex:1;">📋 JSON</button>
-    <button id="exportExcelBtn" class="export" style="flex:1;">📊 Excel</button>
-  </div>
-  
-  <div class="results" id="results">
+
+  <div class="results-container" id="results">
     <div class="empty">
       <span class="icon">🔍</span>
       No posts scraped yet
       <div class="sub">Click Scrape to start collecting posts</div>
     </div>
   </div>
-  
-  <div class="hint">Click any post to open it • Auto-Scrape scrolls down to collect more</div>
-  
-  <script src="popup.js"></script>
+
+  <div class="footer-actions">
+    <div class="export-group">
+      <button class="btn btn-outline btn-sm" id="exportCsvBtn">📄 CSV</button>
+      <button class="btn btn-outline btn-sm" id="exportJsonBtn">📋 JSON</button>
+      <button class="btn btn-outline btn-sm" id="exportExcelBtn">📊 Excel</button>
+      <button class="uid-export-btn" id="exportUidBtn">👤 UIDs</button>
+    </div>
+    <span style="font-size:11px;color:#8d949e;margin-left:auto;align-self:center;">
+      Max: 1000 posts
+    </span>
+  </div>
+</div>
+
+<script src="popup.js"></script>
 </body>
 </html>

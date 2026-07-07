@@ -47,12 +47,12 @@ function renderPosts(posts) {
   statsEl.style.display = 'block';
   
   resultsEl.innerHTML = posts.map((p, i) => `
-    <div class="post" data-url="${p.url || ''}" data-description="${encodeURIComponent(p.text || '')}" data-index="${i}">
+    <div class="post" data-url="${p.url || ''}" data-postid="${p.postId || ''}" data-description="${encodeURIComponent(p.text || '')}" data-index="${i}">
       <div class="text">${p.text ? p.text.slice(0, 150) + (p.text.length > 150 ? '...' : '') : 'No text'}</div>
       <div class="metrics">
         <span>❤️ ${(p.reactions || 0).toLocaleString()}</span>
-        <span>↗️ ${(p.comments || 0).toLocaleString()}</span>
-        <span>💬 ${(p.shares || 0).toLocaleString()}</span>
+        <span>💬 ${(p.comments || 0).toLocaleString()}</span>
+        <span>↗️ ${(p.shares || 0).toLocaleString()}</span>
         <span>📅 ${p.timestamp ? p.timestamp.slice(0, 10) : ''}</span>
       </div>
     </div>
@@ -374,6 +374,10 @@ function exportToExcel(posts) {
   setStatus(`📊 Exported ${posts.length} posts to Excel (❤️${totalReactions.toLocaleString()} 💬${totalComments.toLocaleString()} ↗️${totalShares.toLocaleString()})`, 'success');
 }
 
+function isSpecificFacebookPostUrl(url) {
+  return !!url && /facebook\.com.*(\/posts\/|\/permalink\/|story_fbid=|\/story\.php|\/photos\/|\/videos\/|ft_ent_identifier=|fbid=|[\?&]id=)/i.test(url);
+}
+
 // ============================================
 // CLICK POST TO NAVIGATE
 // ============================================
@@ -382,9 +386,10 @@ resultsEl.addEventListener('click', async (e) => {
   if (!post) return;
   
   const url = post.getAttribute('data-url');
+  const postId = post.getAttribute('data-postid') || '';
   const description = decodeURIComponent(post.getAttribute('data-description') || '');
   
-  if (url && url.includes('facebook.com')) {
+  if (url && url.includes('facebook.com') && isSpecificFacebookPostUrl(url)) {
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (tab) {
@@ -397,14 +402,14 @@ resultsEl.addEventListener('click', async (e) => {
     }
   }
   
-  if (description) {
+  if (url || description || postId) {
     try {
       setStatus('🔍 Finding post...', 'loading');
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       
       const response = await chrome.tabs.sendMessage(tab.id, {
         action: 'NAVIGATE_TO_POST',
-        postData: { url: url, text: description }
+        postData: { url, text: description, postId }
       });
       
       if (response && response.success) {
