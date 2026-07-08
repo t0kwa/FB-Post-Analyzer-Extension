@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>QC Facebook Page: Post Scraper and Finder</title>
+  <title>QC Facebook Page: Keyword Scan</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -101,11 +101,7 @@
       display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
     }
     .post .metrics { display: flex; gap: 14px; font-size: 12px; color: #65676b; flex-wrap: wrap; }
-    .verify-tag { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 4px; white-space: nowrap; letter-spacing: 0.2px; }
-    .verify-tag.match { background: #f2f7f2; color: #2e7d32; border: 1px solid #c8e0c9; }
-    .verify-tag.mismatch { background: #fdf1f0; color: #c0392b; border: 1px solid #f0cfc9; }
-    .verify-tag.pending { background: #f0f1f2; color: #8d949e; border: 1px solid #e4e6eb; }
-    .empty { padding: 40px 20px; text-align: center; color: #8d949e; font-size: 13px; }
+        .empty { padding: 40px 20px; text-align: center; color: #8d949e; font-size: 13px; }
     .empty .sub { font-size: 12px; color: #b0b3b8; margin-top: 4px; }
     .footer-actions {
       display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px;
@@ -119,7 +115,7 @@
 <body>
 <div class="container">
   <div class="header">
-    <h1>QC Facebook Page: Post Scraper and Finder</h1>
+    <h1>QC Facebook Page: Keyword Scan</h1>
     <button class="win-btn" id="openWindowBtn" title="Open in a separate window so scraping doesn't stop when the popup loses focus">Detach</button>
   </div>
 
@@ -142,23 +138,21 @@
   <div class="step-label">2. Enter keyword and scan</div>
   <div class="search-box">
     <input type="text" id="keyword" placeholder="Search keyword" />
-    <button class="btn btn-dark" id="searchBtn">Scrape</button>
+    <button class="btn btn-dark" id="searchBtn">Scan</button>
   </div>
 
   <div class="btn-group">
-    <button class="btn btn-outline" id="autoScrapeBtn">Auto-Scrape</button>
+    <button class="btn btn-outline" id="autoScrapeBtn">Auto-Scan</button>
     <button class="btn btn-outline-red" id="stopBtn" style="display:none;">Stop</button>
-    <button class="btn btn-outline" id="verifyBtn">Verify Unique Posts</button>
     <button class="btn btn-outline btn-sm" id="clearBtn">Clear</button>
   </div>
 
-  <div class="status idle" id="status">Ready to scrape</div>
+  <div class="status idle" id="status">Ready to scan</div>
 
   <div class="stats" id="stats">
     <div>
-      <span class="count" id="postCount">0</span> posts scraped
+      <span class="count" id="postCount">0</span> posts scanned
       <span class="sub-stat"><span id="uidCount">0</span> unique Post IDs</span>
-      <span class="sub-stat"><span id="verifiedCount">0</span> verified</span>
     </div>
     <div class="scan-info" id="scanInfo">0 scanned</div>
   </div>
@@ -166,7 +160,7 @@
   <div class="results-container" id="results">
     <div class="empty">
       No posts scraped yet
-      <div class="sub">Click Scrape to start collecting posts</div>
+      <div class="sub">Click Scan to start collecting posts</div>
     </div>
   </div>
 

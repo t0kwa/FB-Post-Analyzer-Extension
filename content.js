@@ -33,53 +33,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  // Used by the "Verify Unique Posts" step: this content script instance lives on
-  // a specific post's own permalink page (opened in a background tab), so we
-  // just extract whatever the single biggest/most relevant post container is.
-  if (request.action === 'SCRAPE_SINGLE_POST') {
-    (async () => {
-      try {
-        await new Promise(r => setTimeout(r, 300));
-        const pageInfo = getPageInfo();
-        let containers = getPostContainers();
-
-        let expandedAny = false;
-        for (const c of containers) {
-          if (expandSeeMore(c)) expandedAny = true;
-        }
-        if (expandedAny) {
-          await new Promise(r => setTimeout(r, 500));
-          containers = getPostContainers();
-        }
-
-        if (!containers.length) {
-          sendResponse({ post: null, error: 'No post container found on page' });
-          return;
-        }
-
-        // Prefer the container whose extracted post ID matches what we expect
-        let best = null;
-        for (const c of containers) {
-          const data = extractFullPostData(c, pageInfo);
-          if (!data) continue;
-          if (request.expectedPostId && data.postId === request.expectedPostId) {
-            best = data;
-            break;
-          }
-          if (!best || (data.text || '').length > (best.text || '').length) {
-            best = data;
-          }
-        }
-
-        sendResponse({ post: best });
-      } catch (e) {
-        console.error('[FB-SCRAPER] Single-post scrape error:', e);
-        sendResponse({ post: null, error: e && e.message ? e.message : String(e) });
-      }
-    })();
-    return true;
-  }
-
   if (request.action === 'SCROLL_DOWN') {
     window.scrollBy(0, 800);
     setTimeout(() => sendResponse({ done: true }), 500);
@@ -979,4 +932,4 @@ function getPageInfo() {
   return { name: name || 'Unknown Page', url: url };
 }
 
-console.log('[FB-SCRAPER] Ready - Enhanced version scanning up to 1000 posts, single-post verify enabled');
+console.log('[FB-SCRAPER] Ready - Enhanced version scanning up to 1000 posts');
