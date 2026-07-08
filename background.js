@@ -2,12 +2,10 @@
 
 console.log('[FB-SCRAPER] Background script loaded');
 
-// Listen for extension installation
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[FB-SCRAPER] Extension installed successfully');
 });
 
-// Handle messages from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'GET_TAB_ID') {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -19,10 +17,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     });
     return true;
   }
-  
+
   if (request.action === 'GET_EXTENSION_INFO') {
-    sendResponse({ 
-      version: '3.0',
+    sendResponse({
+      version: '3.1',
       name: 'Facebook Post Scraper Pro',
       maxPosts: 1000
     });

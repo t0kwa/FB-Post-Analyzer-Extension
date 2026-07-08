@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Facebook Post Scraper Pro",
-  "version": "3.0",
-  "description": "Scrape Facebook posts with UID extraction and export capabilities",
+  "version": "3.1",
+  "description": "Scrape Facebook Page posts by keyword, verify by post ID, and export engagement data",
   "permissions": [
     "activeTab",
     "storage",
     "downloads",
-    "scripting"
+    "scripting",
+    "tabs"
   ],
   "host_permissions": [
     "https://www.facebook.com/*",
@@ -26,9 +27,5 @@
   },
   "action": {
     "default_popup": "popup.html"
-  },
-  "web_accessible_resources": [{
-    "resources": ["inject.js"],
-    "matches": ["https://www.facebook.com/*", "https://facebook.com/*"]
-  }]
+  }
 }

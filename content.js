@@ -1,10 +1,9 @@
-// content.js - Full Facebook Post Scraper
+// content.js - Full Facebook Post Scraper (with single-post verification)
 
 console.log('[FB-SCRAPER] Content script loaded');
 
 let allScrapedPosts = [];
 let seenKeys = new Set();
-let isScraping = false;
 let currentPageName = '';
 const MAX_SCAN_LIMIT = 1000;
 
@@ -27,8 +26,55 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const results = await scrapePosts(request.keyword);
         sendResponse(results);
       } catch (e) {
-        console.error('[FB-SCRAPER] Error:', e);
-        sendResponse({ posts: allScrapedPosts, scanned: 0, error: e.message });
+        console.error('[FB-SCRAPER] Scrape error:', e, e && e.stack ? e.stack : 'no-stack');
+        sendResponse({ posts: allScrapedPosts, scanned: 0, error: e && e.message ? e.message : String(e) });
+      }
+    })();
+    return true;
+  }
+
+  // Used by the "Verify Unique Posts" step: this content script instance lives on
+  // a specific post's own permalink page (opened in a background tab), so we
+  // just extract whatever the single biggest/most relevant post container is.
+  if (request.action === 'SCRAPE_SINGLE_POST') {
+    (async () => {
+      try {
+        await new Promise(r => setTimeout(r, 300));
+        const pageInfo = getPageInfo();
+        let containers = getPostContainers();
+
+        let expandedAny = false;
+        for (const c of containers) {
+          if (expandSeeMore(c)) expandedAny = true;
+        }
+        if (expandedAny) {
+          await new Promise(r => setTimeout(r, 500));
+          containers = getPostContainers();
+        }
+
+        if (!containers.length) {
+          sendResponse({ post: null, error: 'No post container found on page' });
+          return;
+        }
+
+        // Prefer the container whose extracted post ID matches what we expect
+        let best = null;
+        for (const c of containers) {
+          const data = extractFullPostData(c, pageInfo);
+          if (!data) continue;
+          if (request.expectedPostId && data.postId === request.expectedPostId) {
+            best = data;
+            break;
+          }
+          if (!best || (data.text || '').length > (best.text || '').length) {
+            best = data;
+          }
+        }
+
+        sendResponse({ post: best });
+      } catch (e) {
+        console.error('[FB-SCRAPER] Single-post scrape error:', e);
+        sendResponse({ post: null, error: e && e.message ? e.message : String(e) });
       }
     })();
     return true;
@@ -46,6 +92,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  if (request.action === 'CHECK_LOGIN') {
+    const loggedIn = isFacebookLoggedIn();
+    sendResponse({ loggedIn, url: window.location.href });
+    return true;
+  }
+
   if (request.action === 'CLEAR_ACCUMULATED') {
     allScrapedPosts = [];
     seenKeys = new Set();
@@ -54,8 +106,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'GET_SCRAPED_DATA') {
-    sendResponse({ 
-      posts: allScrapedPosts, 
+    sendResponse({
+      posts: allScrapedPosts,
       count: allScrapedPosts.length,
       pageName: currentPageName,
       pageUrl: window.location.href
@@ -81,7 +133,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // ============================================
 async function scrapePosts(keyword = '') {
   console.log('[FB-SCRAPER] Scraping posts...');
-  
+
   if (allScrapedPosts.length >= MAX_SCAN_LIMIT) {
     console.log('[FB-SCRAPER] Reached maximum scan limit:', MAX_SCAN_LIMIT);
     return {
@@ -93,10 +145,10 @@ async function scrapePosts(keyword = '') {
       maxReached: true
     };
   }
-  
+
   const pageInfo = getPageInfo();
   currentPageName = pageInfo.name;
-  
+
   let containers = getPostContainers();
   console.log('[FB-SCRAPER] Found', containers.length, 'containers');
 
@@ -118,32 +170,24 @@ async function scrapePosts(keyword = '') {
       console.log('[FB-SCRAPER] Stopping - reached max scan limit');
       break;
     }
-    
+
     try {
       const postData = extractFullPostData(container, pageInfo);
       if (!postData) continue;
-      
+
       scannedCount++;
-      
-      if (keywordLower) {
-        const textLower = postData.text.toLowerCase();
-        const fullTextLower = (postData.fullText || '').toLowerCase();
-        const authorLower = (postData.authorName || '').toLowerCase();
-        
-        if (!textLower.includes(keywordLower) && 
-            !fullTextLower.includes(keywordLower) && 
-            !authorLower.includes(keywordLower)) {
-          continue;
-        }
+
+      if (!matchesKeyword(postData, keywordLower)) {
+        continue;
       }
 
-      const key = postData.postId || postData.url || normalizeForKey(postData.text);
+      const key = postData.postId || postData.url || normalizeForKey(postData.text || postData.combinedText || '');
       if (seenKeys.has(key)) continue;
-      
+
       seenKeys.add(key);
       allScrapedPosts.push(postData);
       newCount++;
-      
+
     } catch (e) {
       console.warn('[FB-SCRAPER] Error extracting post:', e);
     }
@@ -168,12 +212,12 @@ function extractFullPostData(container, pageInfo) {
   const fullText = cleanText(container.innerText || '');
   if (!fullText || fullText.length < 20) return null;
 
-  let text = getCaptionText(container) || collapseRepeats(fullText);
-  
-  let url = getPermalink(container);
+  const text = getCaptionText(container) || collapseRepeats(fullText);
+  const combinedText = combineCaption(container) || fullText;
+
+  const url = getPermalink(container);
   let postId = extractPostId(url || '');
 
-  // If no post ID found, try to get from container attributes
   if (!postId) {
     const dataAttrs = ['data-story-id', 'data-post-id', 'data-ft'];
     for (const attr of dataAttrs) {
@@ -199,6 +243,7 @@ function extractFullPostData(container, pageInfo) {
     postId: postId || '',
     url: url || window.location.href,
     text: text || '',
+    combinedText: combinedText || '',
     timestamp: timestamp || '',
     reactions: reactions,
     comments: comments,
@@ -211,6 +256,64 @@ function extractFullPostData(container, pageInfo) {
     scrapedAt: new Date().toISOString(),
     fullText: fullText.slice(0, 2000)
   };
+}
+
+function combineCaption(container) {
+  try {
+    const nodes = Array.from(container.querySelectorAll('div[dir="auto"]'));
+    const parts = [];
+    for (const n of nodes) {
+      if (n.closest('[role="button"]')) continue;
+      const t = cleanText(n.innerText || n.textContent || '');
+      if (!t) continue;
+      if (/see less|see more|view more/i.test(t)) continue;
+      if (t.length < 6) continue;
+      parts.push(t);
+    }
+    if (parts.length === 0) return null;
+    return parts.join('\n').trim();
+  } catch (e) {
+    return null;
+  }
+}
+
+function matchesKeyword(postData, keywordLower) {
+  if (!keywordLower) return true;
+  const norm = (s) => cleanText(String(s || '')).toLowerCase();
+  const fields = [postData.text, postData.combinedText, postData.fullText, postData.authorName, postData.url];
+  for (const f of fields) {
+    if (!f) continue;
+    const v = norm(f);
+    if (v.includes(keywordLower)) return true;
+  }
+
+  const combined = norm((postData.combinedText || postData.fullText || ''));
+  const tokens = combined.split(/\s+/).map(t => t.replace(/^[#@]+|[^\w\u00C0-\u017F]+$/g, '')).filter(Boolean);
+  if (tokens.includes(keywordLower)) return true;
+
+  return false;
+}
+
+function isFacebookLoggedIn() {
+  const url = window.location.href;
+  if (/facebook\.com\/(login|recover|checkpoint|privacy_checkup|save-device)/i.test(url)) {
+    return false;
+  }
+
+  if (document.querySelector('input[name="email"], input#email, input[name="pass"], form[action*="login"]')) {
+    return false;
+  }
+
+  if (document.querySelector('[aria-label="Account"], [aria-label="Home"], [aria-label="Profile"]')) {
+    return true;
+  }
+
+  const pageMeta = document.querySelector('meta[property="og:title"], meta[name="description"]');
+  if (pageMeta) {
+    return true;
+  }
+
+  return !/login\.php/i.test(url);
 }
 
 // ============================================
@@ -308,18 +411,18 @@ function parseEngagementNumber(text) {
   if (!text) return 0;
   const clean = text.replace(/[^0-9.,KkMmBb]/g, '');
   if (!clean) return 0;
-  
+
   const match = clean.match(/^([\d,.]+)\s*([KkMmBb])?/);
   if (!match) return 0;
-  
+
   let num = parseFloat(match[1].replace(/,/g, ''));
   if (isNaN(num)) return 0;
-  
+
   const suffix = (match[2] || '').toLowerCase();
   if (suffix === 'k') return Math.round(num * 1000);
   if (suffix === 'm') return Math.round(num * 1000000);
   if (suffix === 'b') return Math.round(num * 1000000000);
-  
+
   return Math.round(num);
 }
 
@@ -328,14 +431,14 @@ function parseEngagementNumber(text) {
 // ============================================
 function getPostContainers() {
   let allPosts = [];
-  
+
   const articles = document.querySelectorAll('[role="article"]');
   for (const article of articles) {
     if (!isComment(article) && article.innerText.length > 50) {
       allPosts.push(article);
     }
   }
-  
+
   const feedUnits = document.querySelectorAll('[data-pagelet*="FeedUnit"], [data-pagelet*="feed"]');
   for (const unit of feedUnits) {
     if (!isComment(unit) && unit.innerText.length > 50) {
@@ -351,13 +454,13 @@ function getPostContainers() {
       }
     }
   }
-  
+
   const actionButtons = document.querySelectorAll(
     '[data-ad-rendering-role="like_button"], ' +
     '[data-ad-rendering-role="comment_button"], ' +
     '[data-ad-rendering-role="share_button"]'
   );
-  
+
   for (const btn of actionButtons) {
     let container = btn.closest('[role="article"]');
     if (!container) {
@@ -374,20 +477,20 @@ function getPostContainers() {
       allPosts.push(container);
     }
   }
-  
+
   const stories = document.querySelectorAll(
     '[data-testid="post_container"], ' +
     '[data-testid="fbfeed_story"], ' +
     '.story_body_container, ' +
     '.userContentWrapper'
   );
-  
+
   for (const story of stories) {
     if (!allPosts.includes(story) && !isComment(story) && story.innerText.length > 50) {
       allPosts.push(story);
     }
   }
-  
+
   const uniquePosts = [];
   for (const post of allPosts) {
     let isNested = false;
@@ -401,7 +504,7 @@ function getPostContainers() {
       uniquePosts.push(post);
     }
   }
-  
+
   console.log('[FB-SCRAPER] Found', uniquePosts.length, 'unique posts');
   return uniquePosts;
 }
@@ -411,11 +514,11 @@ function getPostContainers() {
 // ============================================
 function extractAuthor(container) {
   const links = container.querySelectorAll('a[href*="facebook.com"]');
-  
+
   for (const link of links) {
     const href = link.href || '';
-    if (href.includes('/posts/') || 
-        href.includes('/photos/') || 
+    if (href.includes('/posts/') ||
+        href.includes('/photos/') ||
         href.includes('/videos/') ||
         href.includes('/permalink/') ||
         href.includes('/story.php') ||
@@ -423,18 +526,18 @@ function extractAuthor(container) {
         href.includes('share')) {
       continue;
     }
-    
+
     const text = cleanText(link.innerText || link.textContent || '');
     if (text && text.length > 2 && text.length < 100) {
-      if (!text.includes('facebook') && 
-          !text.includes('profile') && 
+      if (!text.includes('facebook') &&
+          !text.includes('profile') &&
           !text.includes('page') &&
           !text.match(/^[\d,.]/)) {
         return { name: text, url: href };
       }
     }
   }
-  
+
   const strong = container.querySelectorAll('strong, b, h3, h4, h5');
   for (const el of strong) {
     const text = cleanText(el.innerText || el.textContent || '');
@@ -446,7 +549,7 @@ function extractAuthor(container) {
       return { name: text, url: '' };
     }
   }
-  
+
   return { name: '', url: '' };
 }
 
@@ -462,32 +565,32 @@ function extractTimestamp(container) {
     '[aria-label*="minute" i]',
     '[aria-label*="day" i]'
   ];
-  
+
   for (const selector of timeSelectors) {
     try {
       const elements = container.querySelectorAll(selector);
       for (const el of elements) {
         const datetime = el.getAttribute('datetime') || '';
         if (datetime) return datetime;
-        
+
         const label = el.getAttribute('aria-label') || '';
         if (label && (label.includes('hour') || label.includes('minute') || label.includes('day'))) {
           return label;
         }
-        
+
         const text = cleanText(el.innerText || el.textContent || '');
-        if (text && (text.includes('hour') || text.includes('minute') || text.includes('day') || 
+        if (text && (text.includes('hour') || text.includes('minute') || text.includes('day') ||
             text.includes('ago') || text.includes('at') || text.match(/\d{1,2}:\d{2}/))) {
           return text;
         }
       }
     } catch (e) {}
   }
-  
+
   const allText = container.innerText || '';
   const timeMatch = allText.match(/(\d+\s*(?:hour|minute|day|week|month|year)s?\s*ago)/i);
   if (timeMatch) return timeMatch[1];
-  
+
   return '';
 }
 
@@ -497,13 +600,13 @@ function extractTimestamp(container) {
 function extractImages(container) {
   const images = [];
   const seen = new Set();
-  
+
   const imgElements = container.querySelectorAll('img');
   for (const img of imgElements) {
     const src = img.src || '';
-    if (src && 
-        !src.includes('logo') && 
-        !src.includes('icon') && 
+    if (src &&
+        !src.includes('logo') &&
+        !src.includes('icon') &&
         !src.includes('avatar') &&
         !src.includes('profile_pic') &&
         !src.includes('button') &&
@@ -513,7 +616,7 @@ function extractImages(container) {
       images.push(src);
     }
   }
-  
+
   const divs = container.querySelectorAll('div[style*="background-image"]');
   for (const div of divs) {
     const style = div.getAttribute('style') || '';
@@ -523,7 +626,7 @@ function extractImages(container) {
       images.push(match[1]);
     }
   }
-  
+
   return images.slice(0, 10);
 }
 
@@ -535,7 +638,7 @@ function getPermalink(container) {
   const matchesPostUrl = (href) => {
     return /\/posts\/|\/permalink\/|story_fbid=|\/story\.php|\/photos\/|\/videos\/|ft_ent_identifier=|fbid=|[\?&]id=/i.test(href);
   };
-  
+
   for (const a of links) {
     let href = a.href || '';
     if (!href) continue;
@@ -543,7 +646,7 @@ function getPermalink(container) {
       return normalizeUrl(stripTracking(href));
     }
   }
-  
+
   for (const a of links) {
     let href = a.href || '';
     if (!href) continue;
@@ -551,7 +654,7 @@ function getPermalink(container) {
       return normalizeUrl(stripTracking(href));
     }
   }
-  
+
   for (const a of links) {
     let href = a.href || '';
     if (!href) continue;
@@ -559,21 +662,19 @@ function getPermalink(container) {
       return normalizeUrl(stripTracking(href));
     }
   }
-  
+
   return null;
 }
 
 // ============================================
-// NAVIGATE TO POST - FIXED
+// NAVIGATE TO POST
 // ============================================
 function navigateToPost(postData) {
   console.log('[FB-SCRAPER] Navigating to post:', postData);
-  
-  // Strategy 1: Direct URL navigation (most reliable)
+
   if (postData.url && postData.url.includes('facebook.com')) {
-    // Check if it's a valid post URL
-    if (postData.url.includes('/posts/') || 
-        postData.url.includes('/permalink/') || 
+    if (postData.url.includes('/posts/') ||
+        postData.url.includes('/permalink/') ||
         postData.url.includes('story_fbid=') ||
         postData.url.includes('/photos/') ||
         postData.url.includes('/videos/')) {
@@ -581,37 +682,31 @@ function navigateToPost(postData) {
       window.location.href = postData.url;
       return { success: true, method: 'url', url: postData.url };
     }
-    
-    // If it's just a page URL, try to find the actual post
     console.log('[FB-SCRAPER] URL is page URL, searching for post...');
   }
 
-  // Strategy 2: Find by text content
   if (postData.text) {
     console.log('[FB-SCRAPER] Searching for post by text...');
     const element = findPostElementByText(postData.text);
     if (element) {
       console.log('[FB-SCRAPER] Found element by text');
-      
-      // Try to find post link
+
       const link = element.querySelector('a[href*="/posts/"], a[href*="/permalink/"], a[href*="story_fbid="], a[href*="/photos/"], a[href*="/videos/"]');
       if (link && link.href) {
         console.log('[FB-SCRAPER] Found post link:', link.href);
         window.location.href = link.href;
         return { success: true, method: 'link', url: link.href };
       }
-      
-      // Try to find any link with Facebook URL
+
       const anyLink = element.querySelector('a[href*="facebook.com"]');
-      if (anyLink && anyLink.href && 
+      if (anyLink && anyLink.href &&
           !anyLink.href.match(/facebook\.com\/[^\/?]+$/) &&
           !anyLink.href.includes('/profile.php')) {
         console.log('[FB-SCRAPER] Found Facebook link:', anyLink.href);
         window.location.href = anyLink.href;
         return { success: true, method: 'link', url: anyLink.href };
       }
-      
-      // Click the element as last resort
+
       try {
         console.log('[FB-SCRAPER] Clicking element...');
         element.click();
@@ -622,7 +717,6 @@ function navigateToPost(postData) {
     }
   }
 
-  // Strategy 3: Search by post ID
   if (postData.postId) {
     console.log('[FB-SCRAPER] Searching for post by ID:', postData.postId);
     const links = document.querySelectorAll('a[href*="story_fbid=' + postData.postId + '"], a[href*="/posts/' + postData.postId + '"]');
@@ -635,12 +729,11 @@ function navigateToPost(postData) {
     }
   }
 
-  // Strategy 4: Search by author + text
   if (postData.authorName && postData.text) {
     console.log('[FB-SCRAPER] Searching by author and text...');
     const authorText = postData.authorName.slice(0, 20);
     const postText = postData.text.slice(0, 30);
-    
+
     const elements = document.querySelectorAll('div[role="article"], article');
     for (const el of elements) {
       const elText = el.innerText || '';
@@ -659,16 +752,12 @@ function navigateToPost(postData) {
   return { success: false, error: 'Post not found on page' };
 }
 
-// ============================================
-// FIND POST ELEMENT BY TEXT - IMPROVED
-// ============================================
 function findPostElementByText(text) {
   if (!text) return null;
-  
+
   const searchText = text.slice(0, 50).replace(/'/g, "\\'").replace(/"/g, '\\"');
   console.log('[FB-SCRAPER] Searching for:', searchText);
-  
-  // Try XPath
+
   try {
     const xpath = `//*[contains(text(), '${searchText}')]`;
     const result = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
@@ -676,7 +765,7 @@ function findPostElementByText(text) {
     if (node) {
       let element = node;
       while (element && element !== document.body) {
-        if (element.tagName === 'ARTICLE' || 
+        if (element.tagName === 'ARTICLE' ||
             element.getAttribute('role') === 'article' ||
             element.getAttribute('data-pagelet')?.startsWith('FeedUnit_') ||
             element.getAttribute('data-testid') === 'post_container') {
@@ -690,10 +779,9 @@ function findPostElementByText(text) {
     console.warn('[FB-SCRAPER] XPath search failed:', e);
   }
 
-  // Try finding by partial text match in post containers
   const containers = document.querySelectorAll('div[role="article"], article, div[data-pagelet*="FeedUnit"], div[data-testid="post_container"]');
   const searchWords = text.slice(0, 30).split(' ').filter(w => w.length > 5);
-  
+
   for (const el of containers) {
     const elText = el.innerText || el.textContent || '';
     let matchCount = 0;
@@ -705,14 +793,13 @@ function findPostElementByText(text) {
     }
   }
 
-  // Last resort: look for any element containing the text
   const allElements = document.querySelectorAll('div, span, p');
   for (const el of allElements) {
     const elText = el.innerText || el.textContent || '';
     if (elText.includes(text.slice(0, 30)) && elText.length < 2000) {
       let element = el;
       while (element && element !== document.body) {
-        if (element.tagName === 'ARTICLE' || 
+        if (element.tagName === 'ARTICLE' ||
             element.getAttribute('role') === 'article' ||
             element.getAttribute('data-pagelet')?.startsWith('FeedUnit_') ||
             element.getAttribute('data-testid') === 'post_container') {
@@ -847,7 +934,7 @@ function normalizeForKey(text) {
 
 function extractPostId(url) {
   if (!url) return '';
-  
+
   const patterns = [
     /story_fbid=([^&]+)/i,
     /ft_ent_identifier=([^&]+)/i,
@@ -858,24 +945,24 @@ function extractPostId(url) {
     /\/photos\/([^/?&]+)/i,
     /\/videos\/([^/?&]+)/i
   ];
-  
+
   for (const pattern of patterns) {
     const match = url.match(pattern);
     if (match) return match[1];
   }
-  
+
   return '';
 }
 
 function getPageInfo() {
   const url = window.location.href;
   let name = '';
-  
+
   const nameElements = document.querySelectorAll('h1, h2, strong, span[dir="auto"]');
   for (const el of nameElements) {
     const text = cleanText(el.innerText || el.textContent || '');
     if (text && text.length > 2 && text.length < 100) {
-      if (!text.toLowerCase().includes('comment') && 
+      if (!text.toLowerCase().includes('comment') &&
           !text.toLowerCase().includes('share') &&
           !text.toLowerCase().includes('reaction')) {
         name = text;
@@ -883,13 +970,13 @@ function getPageInfo() {
       }
     }
   }
-  
+
   if (!name) {
     const urlMatch = url.match(/facebook\.com\/([^/?]+)/);
     if (urlMatch) name = urlMatch[1];
   }
-  
+
   return { name: name || 'Unknown Page', url: url };
 }
 
-console.log('[FB-SCRAPER] Ready - Enhanced version scanning up to 1000 posts');
+console.log('[FB-SCRAPER] Ready - Enhanced version scanning up to 1000 posts, single-post verify enabled');
