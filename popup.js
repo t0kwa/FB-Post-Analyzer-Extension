@@ -2,6 +2,7 @@
 
 const keywordInput = document.getElementById('keyword');
 const pageUrlInput = document.getElementById('pageUrl');
+const maxPostsInput = document.getElementById('maxPosts');
 const searchBtn = document.getElementById('searchBtn');
 const gotoPageBtn = document.getElementById('gotoPageBtn');
 const autoScrapeBtn = document.getElementById('autoScrapeBtn');
@@ -25,8 +26,14 @@ const exportUidBtn = document.getElementById('exportUidBtn');
 let isScraping = false;
 let shouldStop = false;
 let allPosts = [];
-const MAX_SCAN_LIMIT = 1000;
+const HARD_CAP = 1000; // absolute ceiling, matches content.js
 const STORAGE_KEY = 'fb_scraper_posts_v1';
+
+function getDesiredMaxPosts() {
+  const raw = parseInt(maxPostsInput.value, 10);
+  if (!Number.isFinite(raw) || raw < 1) return HARD_CAP;
+  return Math.min(HARD_CAP, raw);
+}
 
 // ============================================
 // STORAGE (persists across popup close/reopen)
@@ -243,10 +250,12 @@ async function doScrape(keyword, isAuto = false) {
       return;
     }
 
+    const maxPosts = getDesiredMaxPosts();
     const response = await chrome.tabs.sendMessage(tab.id, {
       action: 'SCRAPE_POSTS',
       keyword: keyword,
-      isAutoScrape: isAuto
+      isAutoScrape: isAuto,
+      maxPosts: maxPosts
     });
 
     console.log('[FB-SCRAPER] Response:', response);
@@ -259,7 +268,7 @@ async function doScrape(keyword, isAuto = false) {
         setStatus(`No posts found${keyword ? ' with "' + keyword + '"' : ''}`, 'info');
       } else {
         const newMsg = response.newPosts > 0 ? ` (+${response.newPosts} new)` : '';
-        const maxMsg = response.maxReached ? ` (Max ${MAX_SCAN_LIMIT} reached)` : '';
+        const maxMsg = response.maxReached ? ` (Limit of ${maxPosts} reached)` : '';
         setStatus(`Scanned ${response.posts.length} posts${newMsg}${maxMsg}${keyword ? ' with "' + keyword + '"' : ''}`, 'success');
       }
 
@@ -326,6 +335,7 @@ function exportUids(posts) {
 async function startAutoScrape() {
   const keyword = keywordInput.value.trim();
   const pageUrl = pageUrlInput.value.trim();
+  const maxPosts = getDesiredMaxPosts();
 
   if (isScraping) {
     setStatus('Already scraping...', 'info');
@@ -359,63 +369,65 @@ async function startAutoScrape() {
   autoScrapeBtn.disabled = true;
   stopBtn.style.display = 'inline-block';
   searchBtn.disabled = true;
-  setStatus(`Auto-scanning${keyword ? ' for "' + keyword + '"' : ''}... (Max ${MAX_SCAN_LIMIT} posts)`, 'loading');
+  setStatus(`Auto-scanning${keyword ? ' for "' + keyword + '"' : ''}... (limit: ${maxPosts} posts)`, 'loading');
 
   let iteration = 0;
   const maxScans = 50;
   let noNewPostsCount = 0;
+  let staleScrollCount = 0;
+  const maxStaleScrolls = 6; // stop once several scrolls in a row load nothing new
   let prevCount = 0;
 
-  while (!shouldStop && iteration < maxScans && allPosts.length < MAX_SCAN_LIMIT) {
+  while (!shouldStop && iteration < maxScans && allPosts.length < maxPosts) {
     iteration++;
 
     await doScrape(keyword, true);
 
-    if (allPosts.length >= MAX_SCAN_LIMIT) {
-      setStatus(`Reached maximum of ${MAX_SCAN_LIMIT} posts!`, 'success');
+    if (allPosts.length >= maxPosts) {
+      setStatus(`Reached your limit of ${maxPosts} posts!`, 'success');
       break;
     }
 
     if (allPosts.length > prevCount) {
       prevCount = allPosts.length;
       noNewPostsCount = 0;
-      setStatus(`Scanned ${prevCount}/${MAX_SCAN_LIMIT} posts so far (pass ${iteration})`, 'loading');
+      setStatus(`Scanned ${prevCount}/${maxPosts} posts so far (pass ${iteration})`, 'loading');
     } else {
       noNewPostsCount++;
       if (noNewPostsCount > 8 && iteration > 8) {
-        setStatus(`No new posts. Total: ${prevCount}/${MAX_SCAN_LIMIT} (pass ${iteration})`, 'info');
+        setStatus(`No new posts. Total: ${prevCount}/${maxPosts} (pass ${iteration})`, 'info');
       }
     }
 
+    // Auto-scroll to load more posts. content.js reports whether the page
+    // actually scrolled/grew, which is a much more reliable "did anything
+    // happen" signal than a fixed sleep.
+    let grew = true;
     try {
-      await chrome.tabs.sendMessage(tab.id, { action: 'SCROLL_DOWN' });
+      const scrollResult = await chrome.tabs.sendMessage(tab.id, { action: 'SCROLL_DOWN' });
+      grew = scrollResult ? !!scrollResult.grew : true;
     } catch (e) {}
 
-    await new Promise(r => setTimeout(r, 1500));
+    staleScrollCount = grew ? 0 : staleScrollCount + 1;
 
-    try {
-      const result = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => window.innerHeight + window.scrollY >= document.body.scrollHeight - 100
-      });
+    if (staleScrollCount >= maxStaleScrolls) {
+      setStatus(`Reached the bottom of the feed. Scanned ${prevCount}/${maxPosts} posts`, 'success');
+      break;
+    }
 
-      if (result && result[0] && result[0].result && noNewPostsCount > 5) {
-        setStatus(`Reached bottom! Scanned ${prevCount}/${MAX_SCAN_LIMIT} posts`, 'success');
-        break;
-      }
-    } catch (e) {}
+    await new Promise(r => setTimeout(r, staleScrollCount > 0 ? 2000 : 1000));
   }
 
   if (shouldStop) {
     setStatus(`Stopped. Scanned ${prevCount} posts.`, 'info');
   } else if (iteration >= maxScans) {
-    setStatus(`Max scans reached. Scanned ${prevCount} posts.`, 'info');
-  } else if (allPosts.length >= MAX_SCAN_LIMIT) {
-    setStatus(`Successfully scanned ${MAX_SCAN_LIMIT} posts!`, 'success');
+    setStatus(`Max scan passes reached. Scanned ${prevCount} posts.`, 'info');
+  } else if (allPosts.length >= maxPosts) {
+    setStatus(`Successfully scanned ${Math.min(prevCount, maxPosts)} posts!`, 'success');
   }
 
   isScraping = false;
-  autoScrapeBtn.textContent = 'Auto-Scrape';
+  autoScrapeBtn.textContent = 'Start Auto-Scan';
   autoScrapeBtn.disabled = false;
   stopBtn.style.display = 'none';
   searchBtn.disabled = false;
@@ -444,7 +456,7 @@ function exportToCSV(posts) {
 
   const headers = [
     'Post ID', 'Date Posted', 'Text', 'Reactions', 'Comments', 'Shares',
-    'URL', 'Author Name', 'Page Name', 'Scraped At'
+    'URL', 'Link Source', 'Author Name', 'Page Name', 'Scraped At'
   ];
 
   const rows = unique.map(p => [
@@ -455,6 +467,7 @@ function exportToCSV(posts) {
     p.comments || 0,
     p.shares || 0,
     p.url || '',
+    p.linkSource || '',
     p.authorName || '',
     p.pageName || '',
     p.scrapedAt || ''
@@ -557,7 +570,7 @@ function exportToExcel(posts) {
 }
 
 function isSpecificFacebookPostUrl(url) {
-  return !!url && /facebook\.com.*(\/posts\/|\/permalink\/|story_fbid=|\/story\.php|\/photos\/|\/videos\/|ft_ent_identifier=|fbid=|[\?&]id=)/i.test(url);
+  return !!url && /facebook\.com.*(\/posts\/|\/permalink\/|story_fbid=|\/story\.php|\/photos\/|\/videos\/|ft_ent_identifier=|fbid=|[\?&]id=|\/share\/)/i.test(url);
 }
 
 // ============================================
@@ -696,4 +709,4 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(loadPageInfo, 5000);
 });
 
-console.log('[FB-SCRAPER] Popup ready - login check, scrape, export');          
+console.log('[FB-SCRAPER] Popup ready - login check, scrape, export');

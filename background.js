@@ -20,7 +20,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'GET_EXTENSION_INFO') {
     sendResponse({
-      version: '3.1',
+      version: '3.2',
       name: 'Facebook Post Scraper Pro',
       maxPosts: 1000
     });

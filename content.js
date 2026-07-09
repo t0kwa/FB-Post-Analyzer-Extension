@@ -1,11 +1,30 @@
 // content.js - Full Facebook Post Scraper (with single-post verification)
+//
+// The post-grouping / author-matching / link-resolution logic below is
+// ported from a reference Playwright scraper (facebook.js). Selectors,
+// aria-labels, and Facebook-specific strings are kept verbatim from that
+// reference so behavior matches exactly. The one thing that had to change
+// going from a Playwright script to a Chrome extension content script:
+//   - There's no page.evaluate() boundary here - content scripts already
+//     run with direct DOM access, so the reference's page.evaluate(...)
+//     wrappers are simply removed; the DOM logic inside them is unchanged.
+//
+// LINK RESOLUTION: post permalinks are read straight out of the DOM (the
+// post's timestamp anchor, header links, raw markup, or a built /posts/<id>
+// URL from an extracted post id) - see getPostLink() / getTimestampPermalink()
+// below. There is deliberately no "click Share -> click Copy link -> read
+// clipboard" step: that flow depends on Facebook's share-dialog markup,
+// which changes often and made link resolution flaky/slow. The timestamp
+// anchor is the same link Facebook's own UI uses when you click the
+// timestamp to open a post, so it's both reliable and requires no clicking.
 
 console.log('[FB-SCRAPER] Content script loaded');
 
-let allScrapedPosts = [];
-let seenKeys = new Set();
+let allScrapedPosts = [];   // formatted posts currently exposed to the popup
+let rawPosts = [];          // deduped raw post groups collected so far (this page/session)
+let seenRaw = new Map();    // dedupe key -> index into rawPosts
 let currentPageName = '';
-const MAX_SCAN_LIMIT = 1000;
+const MAX_SCAN_LIMIT = 5000;
 
 // Listen for messages
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -21,9 +40,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       try {
         if (!request.isAutoScrape) {
           allScrapedPosts = [];
-          seenKeys = new Set();
+          rawPosts = [];
+          seenRaw = new Map();
         }
-        const results = await scrapePosts(request.keyword);
+        const results = await scrapePosts(request.keyword, request.maxPosts);
         sendResponse(results);
       } catch (e) {
         console.error('[FB-SCRAPER] Scrape error:', e, e && e.stack ? e.stack : 'no-stack');
@@ -34,8 +54,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'SCROLL_DOWN') {
-    window.scrollBy(0, 800);
-    setTimeout(() => sendResponse({ done: true }), 500);
+    (async () => {
+      const before = {
+        scrollY: Math.round(window.scrollY || document.documentElement.scrollTop || 0),
+        height: Math.round(document.documentElement.scrollHeight || document.body.scrollHeight || 0)
+      };
+
+      try {
+        window.scrollBy({ top: Math.max(window.innerHeight * 0.55, 550), left: 0, behavior: 'instant' });
+      } catch (e) {
+        window.scrollBy(0, 800);
+      }
+      try {
+        window.dispatchEvent(new WheelEvent('wheel', { deltaY: 700, bubbles: true, cancelable: true }));
+      } catch (e) {}
+
+      const grew = await waitFor(() => {
+        const scrollY = Math.round(window.scrollY || document.documentElement.scrollTop || 0);
+        const height = Math.round(document.documentElement.scrollHeight || document.body.scrollHeight || 0);
+        return (scrollY > before.scrollY + 100 || height > before.height + 100) ? true : null;
+      }, 4000, 150);
+
+      sendResponse({ done: true, grew: !!grew });
+    })();
     return true;
   }
 
@@ -53,7 +94,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'CLEAR_ACCUMULATED') {
     allScrapedPosts = [];
-    seenKeys = new Set();
+    rawPosts = [];
+    seenRaw = new Map();
     sendResponse({ done: true });
     return true;
   }
@@ -83,12 +125,19 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // ============================================
 // MAIN SCRAPING FUNCTION
+// (one pass over what's currently rendered - popup.js drives the
+// auto-scroll loop itself via repeated SCRAPE_POSTS + SCROLL_DOWN calls)
 // ============================================
-async function scrapePosts(keyword = '') {
+async function scrapePosts(keyword = '', maxPosts) {
   console.log('[FB-SCRAPER] Scraping posts...');
 
-  if (allScrapedPosts.length >= MAX_SCAN_LIMIT) {
-    console.log('[FB-SCRAPER] Reached maximum scan limit:', MAX_SCAN_LIMIT);
+  const effectiveLimit = Math.min(
+    MAX_SCAN_LIMIT,
+    Number(maxPosts) > 0 ? Math.floor(Number(maxPosts)) : MAX_SCAN_LIMIT
+  );
+
+  if (allScrapedPosts.length >= effectiveLimit) {
+    console.log('[FB-SCRAPER] Reached post limit:', effectiveLimit);
     return {
       posts: allScrapedPosts,
       scanned: 0,
@@ -99,54 +148,48 @@ async function scrapePosts(keyword = '') {
     };
   }
 
-  const pageInfo = getPageInfo();
-  currentPageName = pageInfo.name;
+  const pageIdentity = buildPageIdentity();
+  currentPageName = pageIdentity.name;
 
-  let containers = getPostContainers();
-  console.log('[FB-SCRAPER] Found', containers.length, 'containers');
+  // Reveal any machine-translated captions and expand "See more" before
+  // reading text, same as the reference scraper's pre-collection pass.
+  await revealOriginalText(2);
+  await expandSeeMoreButtons(3);
+  await new Promise(r => setTimeout(r, 300));
 
-  let expandedAny = false;
-  for (const c of containers) {
-    if (expandSeeMore(c)) expandedAny = true;
-  }
-  if (expandedAny) {
-    await new Promise(r => setTimeout(r, 500));
-    containers = getPostContainers();
-  }
+  const collection = await collectPostGroups(pageIdentity);
+  const groups = collection.groups;
+  const keywordList = parseKeywords(keyword);
+  const scannedCount = groups.length;
 
-  let newCount = 0;
-  let scannedCount = 0;
-  const keywordLower = keyword ? cleanText(keyword).toLowerCase() : '';
+  console.log('[FB-SCRAPER] Candidates:', collection.stats.candidateRoots, 'Messages:', collection.stats.messageContainers);
 
-  for (const container of containers) {
-    if (allScrapedPosts.length >= MAX_SCAN_LIMIT) {
-      console.log('[FB-SCRAPER] Stopping - reached max scan limit');
-      break;
-    }
+  for (const group of groups) {
+    const key = getPostKey(group);
+    const textKey = getPostTextKey(group);
 
-    try {
-      const postData = extractFullPostData(container, pageInfo);
-      if (!postData) continue;
+    if (!key) continue;
 
-      scannedCount++;
+    if (textKey && mergeSeenPost(seenRaw, rawPosts, textKey, group)) continue;
+    if (mergeSeenPost(seenRaw, rawPosts, key, group)) continue;
 
-      if (!matchesKeyword(postData, keywordLower)) {
-        continue;
-      }
-
-      const key = postData.postId || postData.url || normalizeForKey(postData.text || postData.combinedText || '');
-      if (seenKeys.has(key)) continue;
-
-      seenKeys.add(key);
-      allScrapedPosts.push(postData);
-      newCount++;
-
-    } catch (e) {
-      console.warn('[FB-SCRAPER] Error extracting post:', e);
-    }
+    seenRaw.set(key, rawPosts.length);
+    if (textKey) seenRaw.set(textKey, rawPosts.length);
+    rawPosts.push(group);
   }
 
-  console.log('[FB-SCRAPER] Scanned', scannedCount, 'posts, found', newCount, 'new matching posts. Total:', allScrapedPosts.length);
+  const authorFiltered = rawPosts.filter((post) => pageAuthorMatches(post.author, pageIdentity));
+  const keywordFiltered = authorFiltered.filter((post) =>
+    matchesKeyword({ text: post.text, authorName: post.author?.name, url: post.link }, keywordList)
+  );
+
+  const previousTotal = allScrapedPosts.length;
+  allScrapedPosts = keywordFiltered
+    .slice(0, effectiveLimit)
+    .map((post) => formatPost(post, pageIdentity));
+  const newCount = Math.max(0, allScrapedPosts.length - previousTotal);
+
+  console.log('[FB-SCRAPER] Scanned', scannedCount, 'candidates. Raw so far:', rawPosts.length, 'Matched:', allScrapedPosts.length);
 
   return {
     posts: allScrapedPosts,
@@ -154,83 +197,95 @@ async function scrapePosts(keyword = '') {
     newPosts: newCount,
     total: allScrapedPosts.length,
     pageName: currentPageName,
-    maxReached: allScrapedPosts.length >= MAX_SCAN_LIMIT
+    maxReached: allScrapedPosts.length >= effectiveLimit
   };
 }
 
 // ============================================
-// EXTRACT FULL POST DATA
+// PAGE IDENTITY (page name + slug, used to tell the page's own posts
+// apart from comments / shares by other people)
 // ============================================
-function extractFullPostData(container, pageInfo) {
-  const fullText = cleanText(container.innerText || '');
-  if (!fullText || fullText.length < 20) return null;
-
-  const text = getCaptionText(container) || collapseRepeats(fullText);
-  const combinedText = combineCaption(container) || fullText;
-
-  const url = getPermalink(container);
-  let postId = extractPostId(url || '');
-
-  if (!postId) {
-    const dataAttrs = ['data-story-id', 'data-post-id', 'data-ft'];
-    for (const attr of dataAttrs) {
-      const val = container.getAttribute(attr);
-      if (val) {
-        const match = val.match(/(\d+)/);
-        if (match) {
-          postId = match[1];
-          break;
-        }
-      }
-    }
-  }
-
-  const reactions = extractEngagementMetric(container, fullText, 'reactions');
-  const comments = extractEngagementMetric(container, fullText, 'comments');
-  const shares = extractEngagementMetric(container, fullText, 'shares');
-  const timestamp = extractTimestamp(container);
-  const images = extractImages(container);
-  const author = extractAuthor(container);
-
+function buildPageIdentity() {
   return {
-    postId: postId || '',
-    url: url || window.location.href,
-    text: text || '',
-    combinedText: combinedText || '',
-    timestamp: timestamp || '',
-    reactions: reactions,
-    comments: comments,
-    shares: shares,
-    authorName: author.name || '',
-    authorUrl: author.url || '',
-    pageName: pageInfo.name || '',
-    pageUrl: pageInfo.url || '',
-    images: images || [],
-    scrapedAt: new Date().toISOString(),
-    fullText: fullText.slice(0, 2000)
+    name: detectPageName(),
+    slug: getPageSlug(window.location.href)
   };
 }
 
-function combineCaption(container) {
+function detectPageName() {
+  const normalizeTextLocal = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+
+  const heading = Array.from(document.querySelectorAll('h1'))
+    .map((element) => normalizeTextLocal(element.innerText || element.textContent || ''))
+    .find((text) => text && text.length <= 100);
+
+  if (heading) return heading;
+
+  const title = normalizeTextLocal(document.title || '');
+  const cleanedTitle = title
+    .replace(/\s*\|\s*Facebook.*$/i, '')
+    .replace(/\s*-\s*Facebook.*$/i, '')
+    .trim();
+
+  if (cleanedTitle) return cleanedTitle;
+
+  const slug = getPageSlug(window.location.href);
+  return slug ? slug.replace(/[._-]+/g, ' ').trim() : '';
+}
+
+function getPageSlug(url) {
   try {
-    const nodes = Array.from(container.querySelectorAll('div[dir="auto"]'));
-    const parts = [];
-    for (const n of nodes) {
-      if (n.closest('[role="button"]')) continue;
-      const t = cleanText(n.innerText || n.textContent || '');
-      if (!t) continue;
-      if (/see less|see more|view more/i.test(t)) continue;
-      if (t.length < 6) continue;
-      parts.push(t);
-    }
-    if (parts.length === 0) return null;
-    return parts.join('\n').trim();
-  } catch (e) {
-    return null;
+    const parsed = new URL(url);
+
+    return parsed.pathname
+      .split('/')
+      .filter(Boolean)
+      .find((part) => !['profile.php', 'groups', 'pages', 'posts', 'videos', 'photos'].includes(part.toLowerCase())) || '';
+  } catch {
+    return '';
   }
 }
 
-function matchesKeyword(postData, keywordLower) {
+function pageAuthorMatches(author, identity) {
+  if (!identity || (!identity.name && !identity.slug)) return true;
+
+  const authorName = normalizeName(author?.name);
+  const expectedName = normalizeName(identity.name);
+  const authorHref = String(author?.href || '').toLowerCase();
+  const expectedSlug = String(identity.slug || '').toLowerCase();
+
+  if (expectedSlug && authorHref.includes(`/${expectedSlug}`)) return true;
+  if (!authorName || !expectedName) return false;
+
+  return authorName === expectedName ||
+    authorName.includes(expectedName) ||
+    expectedName.includes(authorName);
+}
+
+function normalizeName(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s.]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ============================================
+// KEYWORD MATCHING
+// ============================================
+function parseKeywords(keywords) {
+  return String(keywords || '')
+    .split(',')
+    .map((keyword) => cleanText(keyword).toLowerCase())
+    .filter(Boolean);
+}
+
+function matchesKeyword(postData, keywordList) {
+  if (!keywordList || keywordList.length === 0) return true;
+  return keywordList.some((keyword) => matchesSingleKeyword(postData, keyword));
+}
+
+function matchesSingleKeyword(postData, keywordLower) {
   if (!keywordLower) return true;
   const norm = (s) => cleanText(String(s || '')).toLowerCase();
   const fields = [postData.text, postData.combinedText, postData.fullText, postData.authorName, postData.url];
@@ -240,11 +295,755 @@ function matchesKeyword(postData, keywordLower) {
     if (v.includes(keywordLower)) return true;
   }
 
-  const combined = norm((postData.combinedText || postData.fullText || ''));
+  const combined = norm((postData.combinedText || postData.fullText || postData.text || ''));
   const tokens = combined.split(/\s+/).map(t => t.replace(/^[#@]+|[^\w\u00C0-\u017F]+$/g, '')).filter(Boolean);
   if (tokens.includes(keywordLower)) return true;
 
   return false;
+}
+
+// ============================================
+// POST GROUP COLLECTION
+// Ported from the reference Playwright scraper's collectPostGroups().
+// Selectors / aria-labels / ignored-text list are kept verbatim.
+// ============================================
+const PERMALINK_PATTERNS = [
+  '/posts/', '/permalink/', 'story.php', 'story_fbid', '/photos/', 'photo.php',
+  'fbid=', '/videos/', '/watch/?v=', '/reel/', '/share/p/', '/share/v/', '/share/r/'
+];
+const COMMENT_LINK_PATTERNS = ['comment_id=', 'reply_comment_id=', '/comments/', 'comment/replies'];
+const IGNORED_TEXT = new Set([
+  'like', 'comment', 'share', 'send', 'see more', 'see less', 'all reactions:',
+  'top comments', 'most relevant', 'all comments', 'write a comment',
+  'view more comments', 'view previous comments', 'hide', 'report', 'follow',
+  'message', 'online status indicator active', 'online status indicator inactive'
+]);
+const POST_MESSAGE_SELECTOR = [
+  "[data-ad-preview='message']",
+  "[data-ad-comet-preview='message']",
+  "[data-ad-rendering-role='story_message']"
+].join(', ');
+
+function ptNormalizeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function isCommentLink(link) {
+  return COMMENT_LINK_PATTERNS.some((pattern) => (link || '').includes(pattern));
+}
+
+function isHiddenEl(element) {
+  const style = window.getComputedStyle(element);
+  return style.display === 'none' ||
+    style.visibility === 'hidden' ||
+    element.getAttribute('aria-hidden') === 'true';
+}
+
+function isUiText(text) {
+  const lower = text.toLowerCase();
+  return IGNORED_TEXT.has(lower) ||
+    /^\d+[KkMm]?$/.test(text) ||
+    /^\d+\s+(comments?|shares?)$/i.test(text) ||
+    /^(likes?|comments?|shares?|reply)$/i.test(text) ||
+    /^translated/i.test(text) ||
+    /translated by facebook/i.test(text);
+}
+
+function isAuthorNoise(text, element) {
+  const lower = text.toLowerCase();
+  const aria = ptNormalizeText(element?.getAttribute('aria-label') || '').toLowerCase();
+  const title = ptNormalizeText(element?.getAttribute('title') || '').toLowerCase();
+  const combined = `${lower} ${aria} ${title}`;
+
+  return isUiText(text) ||
+    combined.includes('online status indicator') ||
+    combined.includes('active now') ||
+    combined.includes('profile picture') ||
+    combined.includes('cover photo') ||
+    combined.includes('verified account') ||
+    lower.startsWith('see more from ') ||
+    lower.startsWith('follow ') ||
+    lower.includes(' is with ');
+}
+
+function getPostRoot(messageContainer) {
+  let article = messageContainer.closest("div[role='article']");
+
+  while (article) {
+    if (article.querySelector("h2 a[href], h3 a[href], strong a[href]")) {
+      return article;
+    }
+    article = article.parentElement?.closest("div[role='article']");
+  }
+
+  return messageContainer.closest("div[role='article']") ||
+    messageContainer.closest('[aria-posinset]') ||
+    messageContainer.closest("[data-pagelet^='FeedUnit_']") ||
+    messageContainer.closest("[data-pagelet*='FeedUnit']");
+}
+
+function getPostIdFromValue(value) {
+  const text = String(value || '');
+  const match = text.match(/(?:story_fbid|post_id|top_level_post_id|mf_story_key)["'=:%\s]+([A-Za-z0-9_.-]+)/i);
+  return match?.[1] || '';
+}
+
+function getPostIdFromRoot(root) {
+  const values = [];
+  const nestedArticles = Array.from(root.querySelectorAll("div[role='article']"))
+    .filter((nested) => nested !== root);
+
+  for (const element of [root, ...Array.from(root.querySelectorAll("[data-ft], [data-store], [data-testid], a[href]")).slice(0, 200)]) {
+    if (nestedArticles.some((nested) => nested.contains(element))) continue;
+
+    values.push(element.getAttribute('data-ft'));
+    values.push(element.getAttribute('data-store'));
+    values.push(element.getAttribute('data-testid'));
+    if (element.href) values.push(element.href);
+  }
+
+  return values.map(getPostIdFromValue).find(Boolean) || '';
+}
+
+function buildPostLink(postId, author, identity) {
+  if (!postId) return '';
+
+  const cleanPostId = encodeURIComponent(postId);
+  const expectedSlug = String(identity?.slug || '');
+
+  if (expectedSlug) {
+    return `https://www.facebook.com/${expectedSlug}/posts/${cleanPostId}`;
+  }
+
+  try {
+    const parsed = new URL(author?.href || '');
+    const authorPath = parsed.pathname.replace(/\/$/, '');
+
+    if (authorPath && authorPath !== '/') {
+      return `${parsed.origin}${authorPath}/posts/${cleanPostId}`;
+    }
+  } catch {
+    return '';
+  }
+
+  return '';
+}
+
+function getPostLink(article, author, identity) {
+  const expectedSlug = String(identity?.slug || '').toLowerCase();
+  const nestedArticles = Array.from(article.querySelectorAll("div[role='article']"))
+    .filter((nested) => nested !== article);
+  const messageContainers = Array.from(article.querySelectorAll(POST_MESSAGE_SELECTOR))
+    .filter((container) => !nestedArticles.some((nested) => nested.contains(container)));
+  const isInsidePostMessage = (anchor) => messageContainers.some((container) => container.contains(anchor));
+  const firstMessage = Array.from(article.querySelectorAll(POST_MESSAGE_SELECTOR))
+    .sort((left, right) => left.getBoundingClientRect().top - right.getBoundingClientRect().top)[0];
+  const firstMessageTop = firstMessage?.getBoundingClientRect().top ?? Number.POSITIVE_INFINITY;
+
+  const isHeaderAnchor = (anchor) => {
+    const box = anchor.getBoundingClientRect();
+    return box.width > 0 && box.height > 0 && box.top <= firstMessageTop + 20;
+  };
+  const isAuthorHref = (href) => {
+    try {
+      const parsed = new URL(href);
+      const cleanPath = parsed.pathname.replace(/^\/|\/$/g, '').toLowerCase();
+      return expectedSlug && cleanPath === expectedSlug;
+    } catch {
+      return false;
+    }
+  };
+  const isPageOwnedPostHref = (href) => {
+    try {
+      const parsed = new URL(href);
+      const path = parsed.pathname.toLowerCase();
+      return Boolean(expectedSlug) && (
+        path.includes(`/${expectedSlug}/posts/`) ||
+        path.includes(`/${expectedSlug}/videos/`) ||
+        path.includes(`/${expectedSlug}/photos/`) ||
+        path.includes(`/${expectedSlug}/reel/`) ||
+        path.includes(`/${expectedSlug}/permalink/`)
+      );
+    } catch {
+      return false;
+    }
+  };
+  const isShareWrapperHref = (href) => {
+    try {
+      const parsed = new URL(href);
+      const path = parsed.pathname.toLowerCase();
+      return path.includes('/share/p/') || path.includes('/share/v/') || path.includes('/share/r/');
+    } catch {
+      return false;
+    }
+  };
+  const getCleanHref = (anchor) => (anchor.href || '').split('#')[0];
+  const isPostHref = (href) =>
+    href &&
+    href.includes('facebook.com') &&
+    !isAuthorHref(href) &&
+    !isCommentLink(href) &&
+    PERMALINK_PATTERNS.some((pattern) => href.includes(pattern));
+  const isPrimaryPermalinkHref = (href) => {
+    try {
+      const parsed = new URL(href);
+      const path = parsed.pathname.toLowerCase();
+      return path.includes(`/${expectedSlug}/posts/`) ||
+        path.includes(`/${expectedSlug}/permalink/`) ||
+        href.includes('story.php') ||
+        href.includes('story_fbid');
+    } catch {
+      return false;
+    }
+  };
+  const rankLinks = (links) => {
+    const uniqueLinks = [...new Set(links)];
+    return uniqueLinks.find((href) => isPageOwnedPostHref(href) && isPrimaryPermalinkHref(href)) ||
+      uniqueLinks.find(isPageOwnedPostHref) ||
+      uniqueLinks.find(isShareWrapperHref) ||
+      uniqueLinks[0] ||
+      '';
+  };
+  const decodeCandidateUrl = (value) => {
+    const unescaped = String(value || '')
+      .replace(/\\\//g, '/')
+      .replace(/&amp;/g, '&')
+      .replace(/\\u0025/g, '%')
+      .replace(/\\u0026/g, '&')
+      .replace(/\\u003d/g, '=');
+    try {
+      return decodeURIComponent(unescaped);
+    } catch {
+      return unescaped;
+    }
+  };
+  const getMarkupLinks = () => {
+    let markupSource = article;
+    if (nestedArticles.length || messageContainers.length) {
+      const clone = article.cloneNode(true);
+      Array.from(clone.querySelectorAll("div[role='article']")).forEach((nested) => nested.remove());
+      Array.from(clone.querySelectorAll(POST_MESSAGE_SELECTOR)).forEach((message) => message.remove());
+      markupSource = clone;
+    }
+    const markup = markupSource.outerHTML || '';
+    const matches = [
+      ...markup.matchAll(/https?:\\?\/\\?\/(?:www\.)?facebook\.com[^"'<>\\\s]+/gi),
+      ...markup.matchAll(/https%3A%2F%2F(?:www\.)?facebook\.com[^"'<>\\\s]+/gi)
+    ];
+    return matches
+      .map((match) => decodeCandidateUrl(match[0]))
+      .map((href) => href.split('#')[0])
+      .filter(isPostHref);
+  };
+
+  const articleLinks = Array.from(article.querySelectorAll('a[href]'))
+    .filter((anchor) => !nestedArticles.some((nested) => nested.contains(anchor)))
+    .filter((anchor) => !isInsidePostMessage(anchor));
+
+  // Priority 0: the post's own timestamp anchor (the "3h" / "Yesterday at
+  // 10:00 AM" text under the author name) is the exact link Facebook's own
+  // UI uses when you click the timestamp to open a post - it's always
+  // present without clicking anything, unlike Share -> Copy link, which
+  // depends on share-dialog markup that changes often and is slow/flaky to
+  // drive from a content script. Prefer it whenever it resolves to a valid
+  // post href.
+  const timeLikeText = /^(?:\d+\s*[a-z]{1,3}|yesterday|just now)$/i;
+  const timeLikeLabel = /\d{1,2}:\d{2}\s*(am|pm)?/i;
+  const weekdayLabel = /^(mon|tue|wed|thu|fri|sat|sun)/i;
+  const timestampAnchor = articleLinks.find((anchor) => {
+    if (anchor.querySelector('time, abbr') || anchor.matches('time, abbr')) return true;
+    const text = cleanText(anchor.innerText || anchor.textContent || '');
+    const label = cleanText(anchor.getAttribute('aria-label') || '');
+    return timeLikeText.test(text) || timeLikeLabel.test(label) || weekdayLabel.test(label);
+  });
+  if (timestampAnchor) {
+    const timestampHref = getCleanHref(timestampAnchor);
+    if (isPostHref(timestampHref)) return { link: timestampHref, linkSource: 'timestamp' };
+  }
+
+  const headerLinks = articleLinks.filter(isHeaderAnchor).map(getCleanHref).filter(isPostHref);
+  const headerLink = rankLinks(headerLinks);
+  if (headerLink) return { link: headerLink, linkSource: 'header' };
+
+  const outerLinks = articleLinks.map((anchor) => (anchor.href || '').split('#')[0]).filter(isPostHref);
+  const outerLink = rankLinks(outerLinks);
+  if (outerLink) return { link: outerLink, linkSource: 'outer' };
+
+  const markupLink = rankLinks(getMarkupLinks());
+  if (markupLink) return { link: markupLink, linkSource: 'markup' };
+
+  const postId = getPostIdFromRoot(article);
+  const builtLink = buildPostLink(postId, author, identity);
+  if (builtLink) return { link: builtLink, linkSource: 'built' };
+
+  return { link: '', linkSource: 'none' };
+}
+
+function hasCommentLinkFn(article) {
+  return Array.from(article.querySelectorAll('a[href]')).some((anchor) => isCommentLink(anchor.href || ''));
+}
+
+function hasPostMessageFn(article) {
+  return Boolean(article.querySelector(POST_MESSAGE_SELECTOR));
+}
+
+function isLikelyCommentArticle(article, link) {
+  if (isCommentLink(link)) return true;
+  if (hasPostMessageFn(article)) return false;
+  if (!link) return true;
+
+  const text = ptNormalizeText(article.innerText || article.textContent || '').toLowerCase();
+  const hasCommentOnlyControls = text.includes('reply') ||
+    text.includes('write a reply') ||
+    text.includes('view more replies') ||
+    text.includes('top fan') ||
+    text.includes('author');
+  const hasPostControls = text.includes('share') || /\d+\s+shares?/.test(text) || text.includes('all reactions:');
+
+  return hasCommentOnlyControls && !hasPostControls;
+}
+
+function getAuthor(article, identity) {
+  const expectedName = normalizeName(identity?.name);
+  const expectedSlug = String(identity?.slug || '').toLowerCase();
+  const candidateElements = Array.from(article.querySelectorAll([
+    "h2 a[href]", "h3 a[href]", "strong a[href]", "span[dir='auto'] a[href]", "a[role='link'][href]"
+  ].join(', ')));
+  const candidates = [];
+
+  for (const link of candidateElements) {
+    if (isHiddenEl(link)) continue;
+
+    const text = ptNormalizeText(link.innerText || link.textContent || '');
+    const href = link.href || '';
+    const name = normalizeName(text);
+    const lowerHref = href.toLowerCase();
+
+    if (!text || text.length > 120) continue;
+    if (PERMALINK_PATTERNS.some((pattern) => href.includes(pattern))) continue;
+    if (isAuthorNoise(text, link)) continue;
+
+    candidates.push({
+      name: text,
+      href,
+      score: Number(expectedSlug && lowerHref.includes(`/${expectedSlug}`)) * 100 +
+        Number(expectedName && name === expectedName) * 80 +
+        Number(expectedName && (name.includes(expectedName) || expectedName.includes(name))) * 40 +
+        Number(Boolean(link.closest('h2, h3, strong'))) * 10
+    });
+  }
+
+  candidates.sort((left, right) => right.score - left.score);
+
+  if (candidates.length > 0) {
+    return { name: candidates[0].name, href: candidates[0].href };
+  }
+
+  const fallback = Array.from(article.querySelectorAll("span[dir='auto'], strong, h2, h3"))
+    .map((element) => ptNormalizeText(element.innerText || element.textContent || ''))
+    .find((text) => text && text.length <= 120 && !isAuthorNoise(text));
+
+  return { name: fallback || '', href: '' };
+}
+
+function getBoundaryTop(article) {
+  const candidates = Array.from(article.querySelectorAll("[role='button'], [aria-label], span, div, a"));
+  const tops = candidates
+    .filter((element) => !isHiddenEl(element))
+    .filter((element) => {
+      const text = ptNormalizeText(element.innerText || element.textContent || '').toLowerCase();
+      const aria = ptNormalizeText(element.getAttribute('aria-label') || '').toLowerCase();
+      const isSmall = text.length > 0 && text.length <= 80;
+
+      if (isSmall && (
+        text === 'like' || text === 'comment' || text === 'share' ||
+        text === 'write a comment' || text === 'most relevant' || text === 'all comments' ||
+        text.includes('view more comment') || text.includes('view previous comment')
+      )) {
+        return true;
+      }
+
+      return aria.includes('write a comment') ||
+        aria.includes('comment as') ||
+        aria.includes('reply') ||
+        aria === 'comment' ||
+        aria.startsWith('comment ');
+    })
+    .map((element) => element.getBoundingClientRect().top)
+    .filter((top) => top > 0);
+
+  return tops.length ? Math.min(...tops) : null;
+}
+
+function getGroupText(article) {
+  const nestedArticles = Array.from(article.querySelectorAll("div[role='article']")).filter((nested) => nested !== article);
+  const messageContainers = Array.from(article.querySelectorAll(POST_MESSAGE_SELECTOR))
+    .filter((container) => !nestedArticles.some((nested) => nested.contains(container)));
+  const sourceContainers = messageContainers.length ? messageContainers : [article];
+  const boundaryTop = getBoundaryTop(article);
+  const lines = [];
+
+  const addLine = (text) => {
+    const duplicateIndex = lines.findIndex((line) => line === text || line.includes(text) || text.includes(line));
+    if (duplicateIndex >= 0) {
+      if (text.length > lines[duplicateIndex].length) lines[duplicateIndex] = text;
+      return;
+    }
+    lines.push(text);
+  };
+
+  for (const container of sourceContainers) {
+    if (isHiddenEl(container)) continue;
+    if (nestedArticles.some((nested) => nested.contains(container))) continue;
+    if (boundaryTop && container.getBoundingClientRect().top >= boundaryTop) continue;
+
+    const renderedLines = String(container.innerText || container.textContent || '')
+      .split('\n')
+      .map(ptNormalizeText)
+      .filter(Boolean);
+
+    for (const text of renderedLines) {
+      if (text.length < 3) continue;
+      if (isUiText(text)) continue;
+      addLine(text);
+    }
+  }
+
+  return lines.join('\n').trim();
+}
+
+function getEngagementCounts(article) {
+  const nestedArticles = Array.from(article.querySelectorAll("div[role='article']")).filter((nested) => nested !== article);
+  const isOwnScope = (element) => !nestedArticles.some((nested) => nested.contains(element));
+  const boundaryTop = getBoundaryTop(article);
+  const isAboveBoundary = (element) => !boundaryTop || element.getBoundingClientRect().top < boundaryTop;
+
+  const parseCount = (value) => {
+    const match = String(value || '').match(/\d[\d.,]*\s*[KkMm]?/);
+    return match ? match[0].replace(/\s+/g, '') : '';
+  };
+
+  const getCountNear = (roleValue) => {
+    const markers = Array.from(article.querySelectorAll(`[data-ad-rendering-role="${roleValue}"]`))
+      .filter(isOwnScope)
+      .filter((element) => !isHiddenEl(element))
+      .filter(isAboveBoundary)
+      .sort((left, right) => left.getBoundingClientRect().top - right.getBoundingClientRect().top);
+
+    for (const marker of markers) {
+      const iconContainer = marker.parentElement;
+      const countContainer = iconContainer?.nextElementSibling;
+      const countSpan = countContainer?.querySelector("span[dir='auto']") || countContainer;
+      const value = parseCount(countSpan?.innerText || countSpan?.textContent || '');
+      if (value) return value;
+    }
+    return '';
+  };
+
+  return {
+    reactions: getCountNear('like_button'),
+    comments: getCountNear('comment_button'),
+    shares: getCountNear('share_button')
+  };
+}
+
+function isSeeMoreControl(element) {
+  const text = ptNormalizeText(element.innerText || element.textContent || '').toLowerCase();
+  const label = ptNormalizeText(element.getAttribute('aria-label') || '').toLowerCase();
+  const isCompact = text.length > 0 && text.length <= 40;
+
+  return (isCompact && (text === 'see more' || text === '... see more' || text.endsWith(' see more'))) ||
+    label === 'see more' ||
+    label === 'see more of this post' ||
+    label.includes('see more text');
+}
+
+function isOriginalTextControl(element) {
+  const text = ptNormalizeText(element.innerText || element.textContent || '').toLowerCase();
+  const label = ptNormalizeText(element.getAttribute('aria-label') || '').toLowerCase();
+  const combined = `${text} ${label}`;
+
+  return combined.includes('see original') ||
+    combined.includes('view original') ||
+    combined.includes('show original') ||
+    combined.includes('original text');
+}
+
+async function expandArticleButtons(article, isMatch) {
+  for (let round = 0; round < 3; round++) {
+    const candidates = Array.from(article.querySelectorAll(
+      "div[role='button'], span[role='button'], a[role='link'], [aria-label]"
+    )).filter((element) => {
+      const box = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return box.width > 0 && box.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+    }).filter((element) => isMatch(element));
+
+    if (candidates.length === 0) break;
+
+    for (const candidate of candidates) candidate.click();
+    await new Promise((resolve) => setTimeout(resolve, 450));
+  }
+}
+
+async function collectPostGroups(pageIdentity) {
+  const articles = Array.from(document.querySelectorAll("div[role='article']"));
+
+  const uniqueElements = (elements) => elements.filter((element, index) =>
+    elements.findIndex((candidate) => candidate === element) === index
+  );
+
+  const postMessageRoots = uniqueElements(
+    Array.from(document.querySelectorAll(POST_MESSAGE_SELECTOR))
+      .map(getPostRoot)
+      .filter(Boolean)
+  );
+  const outerPostMessageRoots = postMessageRoots.filter((root) =>
+    !postMessageRoots.some((other) => other !== root && other.contains(root))
+  );
+  const fallbackArticleRoots = articles.filter((article) => !article.parentElement?.closest("div[role='article']"));
+  const candidateRoots = outerPostMessageRoots.length ? outerPostMessageRoots : fallbackArticleRoots;
+
+  const scrapeRunId = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+
+  const groups = await Promise.all(candidateRoots.map(async (article, index) => {
+    await expandArticleButtons(article, isSeeMoreControl);
+    await expandArticleButtons(article, isOriginalTextControl);
+
+    const text = getGroupText(article);
+    const author = getAuthor(article, pageIdentity);
+    const { link, linkSource } = getPostLink(article, author, pageIdentity);
+    const hasMessage = hasPostMessageFn(article);
+    const engagement = getEngagementCounts(article);
+    const scrapeIndex = `${scrapeRunId}-${index}`;
+
+    article.setAttribute('data-scrape-index', scrapeIndex);
+
+    return {
+      author,
+      text,
+      link,
+      linkSource,
+      hasComment: isCommentLink(link) || hasCommentLinkFn(article),
+      hasPostMessage: hasMessage,
+      isLikelyComment: isLikelyCommentArticle(article, link),
+      reactions: engagement.reactions,
+      comments: engagement.comments,
+      shares: engagement.shares,
+      postIdRaw: getPostIdFromRoot(article),
+      scrapeIndex,
+      element: article
+    };
+  }));
+
+  const filteredGroups = groups.filter((group) =>
+    group.text &&
+    !group.isLikelyComment &&
+    (group.hasPostMessage || group.link)
+  );
+
+  return {
+    groups: filteredGroups,
+    stats: {
+      articleCount: articles.length,
+      candidateRoots: candidateRoots.length,
+      messageContainers: document.querySelectorAll(POST_MESSAGE_SELECTOR).length
+    }
+  };
+}
+
+// ============================================
+// PRE-COLLECTION PASS: reveal translations / expand "See more"
+// across the whole viewport before reading text
+// ============================================
+async function revealOriginalText(maxRounds = 2) {
+  for (let round = 0; round < maxRounds; round++) {
+    const candidates = Array.from(document.querySelectorAll(
+      "div[role='button'], span[role='button'], a[role='link'], [aria-label*='original' i]"
+    )).filter((element) => {
+      const box = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return box.width > 0 && box.height > 0 && box.bottom >= 0 && box.top <= window.innerHeight &&
+        style.display !== 'none' && style.visibility !== 'hidden';
+    }).filter(isOriginalTextControl);
+
+    const uniqueCandidates = candidates.filter((element, index) =>
+      candidates.findIndex((candidate) => candidate === element || element.contains(candidate)) === index
+    );
+
+    for (const candidate of uniqueCandidates.slice(0, 30)) candidate.click();
+
+    if (uniqueCandidates.length === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
+}
+
+async function expandSeeMoreButtons(maxRounds = 3) {
+  for (let round = 0; round < maxRounds; round++) {
+    const candidates = Array.from(document.querySelectorAll(
+      "div[role='button'], span[role='button'], [aria-label='See more'], [aria-label='See more of this post']"
+    )).filter((element) => {
+      const box = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return box.width > 0 && box.height > 0 && box.bottom >= 0 && box.top <= window.innerHeight &&
+        style.display !== 'none' && style.visibility !== 'hidden';
+    }).filter((element) => {
+      const text = (element.innerText || element.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const label = (element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const isTinyIconButton = !text && (label === 'more' || label.includes('more options') || label.includes('actions for this post'));
+      const isCompactTextControl = text.length > 0 && text.length <= 40;
+
+      if (isTinyIconButton) return false;
+
+      return isCompactTextControl && (text === 'see more' || text === '... see more' || text.endsWith(' see more')) ||
+        label === 'see more' ||
+        label === 'see more of this post' ||
+        label.includes('see more text');
+    });
+
+    const uniqueCandidates = candidates.filter((element, index) =>
+      candidates.findIndex((candidate) => candidate === element || element.contains(candidate)) === index
+    );
+
+    for (const candidate of uniqueCandidates.slice(0, 30)) candidate.click();
+
+    if (uniqueCandidates.length === 0) break;
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
+}
+
+// ============================================
+// DEDUPE / MERGE (across scan passes)
+// ============================================
+function getPostKey(post) {
+  if (post.link) return `link:${stripTracking(post.link)}`;
+  return getPostTextKey(post);
+}
+
+function getPostTextKey(post) {
+  const normalizedText = String(post.text || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 500);
+  const normalizedAuthor = normalizeName(post.author?.name || '');
+
+  return normalizedText ? `text:${normalizedAuthor}:${normalizedText}` : '';
+}
+
+function mergeSeenPost(seenMap, posts, key, post) {
+  if (!seenMap.has(key)) return false;
+
+  const existingPost = posts[seenMap.get(key)];
+  let changed = false;
+
+  if (existingPost && !existingPost.link && post.link) {
+    existingPost.link = post.link;
+    existingPost.linkSource = post.linkSource;
+    changed = true;
+  }
+  if (existingPost && (!existingPost.text || post.text.length > existingPost.text.length)) {
+    existingPost.text = post.text;
+    changed = true;
+  }
+  if (existingPost && !existingPost.reactions && post.reactions) {
+    existingPost.reactions = post.reactions;
+    changed = true;
+  }
+  if (existingPost && !existingPost.comments && post.comments) {
+    existingPost.comments = post.comments;
+    changed = true;
+  }
+  if (existingPost && !existingPost.shares && post.shares) {
+    existingPost.shares = post.shares;
+    changed = true;
+  }
+
+  if (changed) delete existingPost._formatted;
+
+  return true;
+}
+
+// ============================================
+// TEXT CLEANUP / FORMATTING
+// ============================================
+function cleanPostText(text) {
+  const seen = new Set();
+
+  return String(text || '')
+    .split('\n')
+    .map((line) => line
+      .replace(/\s*(?:â€¦|\.\.\.|…)\s*see more\s*$/i, '')
+      .replace(/\s*see less\s*$/i, '')
+      .trim())
+    .filter(Boolean)
+    .filter((line) => !/^(\.\.\.\s*)?see more$/i.test(line))
+    .filter((line) => {
+      if (seen.has(line)) return false;
+      seen.add(line);
+      return true;
+    })
+    .join('\n');
+}
+
+function removeAuthorLine(text, identity) {
+  const lines = String(text || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) return '';
+
+  if (pageAuthorMatches({ name: lines[0], href: '' }, identity)) {
+    return lines.slice(1).join('\n').trim();
+  }
+
+  return lines.join('\n');
+}
+
+function formatPost(post, pageIdentity) {
+  if (post._formatted) return post._formatted;
+
+  const formatted = buildFormattedPost(post, pageIdentity);
+  post._formatted = formatted;
+  post.element = null; // release the DOM reference once we've extracted what we need
+  return formatted;
+}
+
+function buildFormattedPost(post, pageIdentity) {
+  const cleanedText = removeAuthorLine(cleanPostText(post.text), pageIdentity);
+  const link = stripTracking(post.link || '');
+  const postId = extractPostId(link) || post.postIdRaw || '';
+
+  let reactions = parseEngagementNumber(post.reactions || '');
+  let comments = parseEngagementNumber(post.comments || '');
+  let shares = parseEngagementNumber(post.shares || '');
+
+  let timestamp = '';
+  let images = [];
+
+  if (post.element) {
+    if (!reactions) reactions = extractEngagementMetric(post.element, post.text, 'reactions');
+    if (!comments) comments = extractEngagementMetric(post.element, post.text, 'comments');
+    if (!shares) shares = extractEngagementMetric(post.element, post.text, 'shares');
+    timestamp = extractTimestamp(post.element);
+    images = extractImages(post.element);
+  }
+
+  return {
+    postId: postId || '',
+    url: link || window.location.href,
+    text: cleanedText || '',
+    combinedText: cleanedText || '',
+    timestamp: timestamp || '',
+    reactions: reactions || 0,
+    comments: comments || 0,
+    shares: shares || 0,
+    authorName: post.author?.name || '',
+    authorUrl: post.author?.href || '',
+    pageName: pageIdentity?.name || '',
+    pageUrl: window.location.href,
+    images: images || [],
+    scrapedAt: new Date().toISOString(),
+    fullText: (post.text || '').slice(0, 2000),
+    linkSource: post.linkSource || 'none'
+  };
 }
 
 function isFacebookLoggedIn() {
@@ -270,7 +1069,9 @@ function isFacebookLoggedIn() {
 }
 
 // ============================================
-// ENGAGEMENT METRIC EXTRACTION
+// ENGAGEMENT METRIC EXTRACTION (fallback path - used only when the
+// primary data-ad-rendering-role lookup in getEngagementCounts() above
+// comes up empty for a given post)
 // ============================================
 function extractEngagementMetric(container, fullText, type) {
   const roleSelectors = {
@@ -362,7 +1163,7 @@ function findEngagementByIcon(container, type) {
 
 function parseEngagementNumber(text) {
   if (!text) return 0;
-  const clean = text.replace(/[^0-9.,KkMmBb]/g, '');
+  const clean = String(text).replace(/[^0-9.,KkMmBb]/g, '');
   if (!clean) return 0;
 
   const match = clean.match(/^([\d,.]+)\s*([KkMmBb])?/);
@@ -380,175 +1181,7 @@ function parseEngagementNumber(text) {
 }
 
 // ============================================
-// POST CONTAINER DETECTION
-// ============================================
-function getPostContainers() {
-  let allPosts = [];
-
-  const articles = document.querySelectorAll('[role="article"]');
-  for (const article of articles) {
-    if (!isComment(article) && article.innerText.length > 50) {
-      allPosts.push(article);
-    }
-  }
-
-  const feedUnits = document.querySelectorAll('[data-pagelet*="FeedUnit"], [data-pagelet*="feed"]');
-  for (const unit of feedUnits) {
-    if (!isComment(unit) && unit.innerText.length > 50) {
-      const childArticles = unit.querySelectorAll('[role="article"]');
-      if (childArticles.length > 1) {
-        for (const child of childArticles) {
-          if (!isComment(child) && child.innerText.length > 50) {
-            allPosts.push(child);
-          }
-        }
-      } else {
-        allPosts.push(unit);
-      }
-    }
-  }
-
-  const actionButtons = document.querySelectorAll(
-    '[data-ad-rendering-role="like_button"], ' +
-    '[data-ad-rendering-role="comment_button"], ' +
-    '[data-ad-rendering-role="share_button"]'
-  );
-
-  for (const btn of actionButtons) {
-    let container = btn.closest('[role="article"]');
-    if (!container) {
-      let parent = btn.parentElement;
-      while (parent && parent !== document.body) {
-        if (parent.innerText && parent.innerText.length > 100) {
-          container = parent;
-          break;
-        }
-        parent = parent.parentElement;
-      }
-    }
-    if (container && !allPosts.includes(container) && !isComment(container) && container.innerText.length > 50) {
-      allPosts.push(container);
-    }
-  }
-
-  const stories = document.querySelectorAll(
-    '[data-testid="post_container"], ' +
-    '[data-testid="fbfeed_story"], ' +
-    '.story_body_container, ' +
-    '.userContentWrapper'
-  );
-
-  for (const story of stories) {
-    if (!allPosts.includes(story) && !isComment(story) && story.innerText.length > 50) {
-      allPosts.push(story);
-    }
-  }
-
-  const uniquePosts = [];
-  for (const post of allPosts) {
-    let isNested = false;
-    for (const other of allPosts) {
-      if (post !== other && other.contains(post)) {
-        isNested = true;
-        break;
-      }
-    }
-    if (!isNested && !uniquePosts.includes(post)) {
-      uniquePosts.push(post);
-    }
-  }
-
-  console.log('[FB-SCRAPER] Found', uniquePosts.length, 'unique posts');
-  return uniquePosts;
-}
-
-// ============================================
-// EXTRACT AUTHOR INFO
-// ============================================
-function extractAuthor(container) {
-  const links = container.querySelectorAll('a[href*="facebook.com"]');
-
-  for (const link of links) {
-    const href = link.href || '';
-    if (href.includes('/posts/') ||
-        href.includes('/photos/') ||
-        href.includes('/videos/') ||
-        href.includes('/permalink/') ||
-        href.includes('/story.php') ||
-        href.includes('comment') ||
-        href.includes('share')) {
-      continue;
-    }
-
-    const text = cleanText(link.innerText || link.textContent || '');
-    if (text && text.length > 2 && text.length < 100) {
-      if (!text.includes('facebook') &&
-          !text.includes('profile') &&
-          !text.includes('page') &&
-          !text.match(/^[\d,.]/)) {
-        return { name: text, url: href };
-      }
-    }
-  }
-
-  const strong = container.querySelectorAll('strong, b, h3, h4, h5');
-  for (const el of strong) {
-    const text = cleanText(el.innerText || el.textContent || '');
-    if (text && text.length > 2 && text.length < 100 && !text.match(/^[\d,.]/)) {
-      const nearbyLink = el.closest('a');
-      if (nearbyLink) {
-        return { name: text, url: nearbyLink.href || '' };
-      }
-      return { name: text, url: '' };
-    }
-  }
-
-  return { name: '', url: '' };
-}
-
-// ============================================
-// EXTRACT TIMESTAMP
-// ============================================
-function extractTimestamp(container) {
-  const timeSelectors = [
-    'time',
-    'abbr',
-    '[data-testid="post_timestamp"]',
-    '[aria-label*="hour" i]',
-    '[aria-label*="minute" i]',
-    '[aria-label*="day" i]'
-  ];
-
-  for (const selector of timeSelectors) {
-    try {
-      const elements = container.querySelectorAll(selector);
-      for (const el of elements) {
-        const datetime = el.getAttribute('datetime') || '';
-        if (datetime) return datetime;
-
-        const label = el.getAttribute('aria-label') || '';
-        if (label && (label.includes('hour') || label.includes('minute') || label.includes('day'))) {
-          return label;
-        }
-
-        const text = cleanText(el.innerText || el.textContent || '');
-        if (text && (text.includes('hour') || text.includes('minute') || text.includes('day') ||
-            text.includes('ago') || text.includes('at') || text.match(/\d{1,2}:\d{2}/))) {
-          return text;
-        }
-      }
-    } catch (e) {}
-  }
-
-  const allText = container.innerText || '';
-  const timeMatch = allText.match(/(\d+\s*(?:hour|minute|day|week|month|year)s?\s*ago)/i);
-  if (timeMatch) return timeMatch[1];
-
-  return '';
-}
-
-// ============================================
-// EXTRACT IMAGES
+// EXTRACT AUXILIARY DATA (images, timestamp)
 // ============================================
 function extractImages(container) {
   const images = [];
@@ -583,40 +1216,117 @@ function extractImages(container) {
   return images.slice(0, 10);
 }
 
+function extractTimestamp(container) {
+  const timeSelectors = [
+    'time', 'abbr', '[data-testid="post_timestamp"]',
+    '[aria-label*="hour" i]', '[aria-label*="minute" i]', '[aria-label*="day" i]'
+  ];
+
+  for (const selector of timeSelectors) {
+    try {
+      const elements = container.querySelectorAll(selector);
+      for (const el of elements) {
+        const datetime = el.getAttribute('datetime') || '';
+        if (datetime) return datetime;
+
+        const label = el.getAttribute('aria-label') || '';
+        if (label && (label.includes('hour') || label.includes('minute') || label.includes('day'))) {
+          return label;
+        }
+
+        const text = cleanText(el.innerText || el.textContent || '');
+        if (text && (text.includes('hour') || text.includes('minute') || text.includes('day') ||
+            text.includes('ago') || text.includes('at') || text.match(/\d{1,2}:\d{2}/))) {
+          return text;
+        }
+      }
+    } catch (e) {}
+  }
+
+  const allText = container.innerText || '';
+  const timeMatch = allText.match(/(\d+\s*(?:hour|minute|day|week|month|year)s?\s*ago)/i);
+  if (timeMatch) return timeMatch[1];
+
+  return '';
+}
+
+function extractPostId(url) {
+  if (!url) return '';
+
+  const patterns = [
+    /story_fbid=([^&]+)/i,
+    /ft_ent_identifier=([^&]+)/i,
+    /fbid=([^&]+)/i,
+    /[\?&]id=(\d+)/i,
+    /\/posts\/([^/?&]+)/i,
+    /\/permalink\/([^/?&]+)/i,
+    /\/photos\/([^/?&]+)/i,
+    /\/videos\/([^/?&]+)/i,
+    /\/share\/p\/([^/?&]+)/i,
+    /\/share\/v\/([^/?&]+)/i,
+    /\/share\/r\/([^/?&]+)/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) return match[1];
+  }
+
+  return '';
+}
+
+function getPageInfo() {
+  const identity = buildPageIdentity();
+  return { name: identity.name || 'Unknown Page', url: window.location.href, slug: identity.slug || '' };
+}
+
 // ============================================
-// GET PERMALINK
+// WAIT / TEXT UTILITIES
 // ============================================
-function getPermalink(container) {
-  const links = container.querySelectorAll('a[href]');
-  const matchesPostUrl = (href) => {
-    return /\/posts\/|\/permalink\/|story_fbid=|\/story\.php|\/photos\/|\/videos\/|ft_ent_identifier=|fbid=|[\?&]id=/i.test(href);
-  };
+function waitFor(conditionFn, timeoutMs = 8000, intervalMs = 150) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const tick = () => {
+      let result;
+      try {
+        result = conditionFn();
+      } catch (e) {
+        result = null;
+      }
+      if (result) {
+        resolve(result);
+        return;
+      }
+      if (Date.now() - start > timeoutMs) {
+        resolve(null);
+        return;
+      }
+      setTimeout(tick, intervalMs);
+    };
+    tick();
+  });
+}
 
-  for (const a of links) {
-    let href = a.href || '';
-    if (!href) continue;
-    if (matchesPostUrl(href)) {
-      return normalizeUrl(stripTracking(href));
-    }
+function cleanText(text) {
+  return (text || '')
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g, '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function stripTracking(link) {
+  if (!link) return '';
+
+  try {
+    const parsed = new URL(link);
+    parsed.searchParams.delete('__cft__');
+    parsed.searchParams.delete('__tn__');
+    return parsed.toString();
+  } catch {
+    return link;
   }
-
-  for (const a of links) {
-    let href = a.href || '';
-    if (!href) continue;
-    if (a.querySelector('time') || a.querySelector('abbr') || a.querySelector('[datetime]')) {
-      return normalizeUrl(stripTracking(href));
-    }
-  }
-
-  for (const a of links) {
-    let href = a.href || '';
-    if (!href) continue;
-    if (href.includes('facebook.com') && !href.match(/facebook\.com\/[^\/?]+$/)) {
-      return normalizeUrl(stripTracking(href));
-    }
-  }
-
-  return null;
 }
 
 // ============================================
@@ -630,7 +1340,8 @@ function navigateToPost(postData) {
         postData.url.includes('/permalink/') ||
         postData.url.includes('story_fbid=') ||
         postData.url.includes('/photos/') ||
-        postData.url.includes('/videos/')) {
+        postData.url.includes('/videos/') ||
+        postData.url.includes('/share/')) {
       console.log('[FB-SCRAPER] Opening post URL directly:', postData.url);
       window.location.href = postData.url;
       return { success: true, method: 'url', url: postData.url };
@@ -767,169 +1478,4 @@ function findPostElementByText(text) {
   return null;
 }
 
-// ============================================
-// HELPER FUNCTIONS
-// ============================================
-
-function isComment(el) {
-  const ownLabel = (el.getAttribute('aria-label') || '').trim();
-  if (/^comment(s)?\s*(by)?\b/i.test(ownLabel)) return true;
-
-  let node = el.parentElement;
-  let depth = 0;
-  while (node && depth < 20) {
-    const role = node.getAttribute && node.getAttribute('role');
-    const label = (node.getAttribute && node.getAttribute('aria-label') || '').trim();
-    if ((role === 'list' || role === 'complementary') && /^comments?$/i.test(label)) {
-      return true;
-    }
-    node = node.parentElement;
-    depth++;
-  }
-  return false;
-}
-
-function getCaptionText(container) {
-  const msgSelectors = [
-    '[data-ad-preview="message"]',
-    '[data-ad-comet-preview="message"]',
-    '[data-testid="post_message"]',
-    '[data-testid="status-text"]',
-    '.userContent',
-    '.post_content',
-    '.html-div',
-    '[dir="auto"]'
-  ];
-
-  for (const selector of msgSelectors) {
-    try {
-      const elements = Array.from(container.querySelectorAll(selector));
-      for (const el of elements) {
-        if (el.closest('[role="button"]')) continue;
-        const text = cleanText(el.innerText || el.textContent || '');
-        if (!text || text.length < 15) continue;
-        if (/see less|see more|view more|more|less/i.test(text)) continue;
-        if (/comment|share|like|reaction/i.test(text) && text.split('\n').length <= 2) continue;
-        return text;
-      }
-    } catch (e) {}
-  }
-
-  const bodyNodes = Array.from(container.querySelectorAll('div[dir="auto"]'));
-  let bestText = '';
-  for (const node of bodyNodes) {
-    if (node.closest('[role="button"]')) continue;
-    const text = cleanText(node.innerText || node.textContent || '');
-    if (!text || text.length < 15) continue;
-    if (/see less|see more|view more|more|less/i.test(text)) continue;
-    if (text.includes('http') && text.length < 60) continue;
-    if (text.length > bestText.length) {
-      bestText = text;
-    }
-  }
-  if (bestText) return bestText;
-
-  const paragraphNodes = Array.from(container.querySelectorAll('p'));
-  for (const p of paragraphNodes) {
-    const text = cleanText(p.innerText || p.textContent || '');
-    if (text && text.length > 15 && !/see less|see more/i.test(text)) {
-      return text;
-    }
-  }
-
-  return null;
-}
-
-function collapseRepeats(text) {
-  return text.replace(/\b(\w+)(?:\s+\1\b){2,}/gi, '$1');
-}
-
-function expandSeeMore(container) {
-  let clicked = false;
-  const candidates = container.querySelectorAll('[role="button"], span, div');
-  for (const el of candidates) {
-    if (el.offsetParent === null) continue;
-    const t = cleanText(el.innerText || el.textContent || '').toLowerCase();
-    if (t === 'see more' || t === 'tingnan pa' || t === 'view more' || t === 'see less' || t === 'more') {
-      try {
-        el.click();
-        clicked = true;
-      } catch (e) {}
-    }
-  }
-  return clicked;
-}
-
-function cleanText(text) {
-  return (text || '')
-    .normalize('NFKC')
-    .replace(/[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g, '')
-    .replace(/\u00A0/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function stripTracking(href) {
-  return href.split('&__tn__')[0].split('&__cft__')[0].split('?__tn__')[0];
-}
-
-function normalizeUrl(href) {
-  try {
-    return new URL(href, window.location.href).href;
-  } catch (e) {
-    return href;
-  }
-}
-
-function normalizeForKey(text) {
-  return text.replace(/\s+/g, ' ').trim().slice(0, 150);
-}
-
-function extractPostId(url) {
-  if (!url) return '';
-
-  const patterns = [
-    /story_fbid=([^&]+)/i,
-    /ft_ent_identifier=([^&]+)/i,
-    /fbid=([^&]+)/i,
-    /[\?&]id=(\d+)/i,
-    /\/posts\/([^/?&]+)/i,
-    /\/permalink\/([^/?&]+)/i,
-    /\/photos\/([^/?&]+)/i,
-    /\/videos\/([^/?&]+)/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = url.match(pattern);
-    if (match) return match[1];
-  }
-
-  return '';
-}
-
-function getPageInfo() {
-  const url = window.location.href;
-  let name = '';
-
-  const nameElements = document.querySelectorAll('h1, h2, strong, span[dir="auto"]');
-  for (const el of nameElements) {
-    const text = cleanText(el.innerText || el.textContent || '');
-    if (text && text.length > 2 && text.length < 100) {
-      if (!text.toLowerCase().includes('comment') &&
-          !text.toLowerCase().includes('share') &&
-          !text.toLowerCase().includes('reaction')) {
-        name = text;
-        break;
-      }
-    }
-  }
-
-  if (!name) {
-    const urlMatch = url.match(/facebook\.com\/([^/?]+)/);
-    if (urlMatch) name = urlMatch[1];
-  }
-
-  return { name: name || 'Unknown Page', url: url };
-}
-
-console.log('[FB-SCRAPER] Ready - Enhanced version scanning up to 1000 posts');
+console.log('[FB-SCRAPER] Ready - Enhanced version (ported post-grouping/author-matching/link-resolution from reference scraper)');

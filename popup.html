@@ -98,7 +98,13 @@
     .post .postid { font-size: 10.5px; color: #8d949e; font-family: monospace; }
     .post .text {
       font-size: 13px; color: #1c1e21; line-height: 1.4; margin-bottom: 6px;
-      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+      /* multi-line truncation */
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      /* standard property for compatibility */
+      line-clamp: 3;
+      overflow: hidden;
     }
     .post .metrics { display: flex; gap: 14px; font-size: 12px; color: #65676b; flex-wrap: wrap; }
         .empty { padding: 40px 20px; text-align: center; color: #8d949e; font-size: 13px; }
@@ -135,14 +141,20 @@
     <button class="btn btn-outline" id="gotoPageBtn">Go to Page</button>
   </div>
 
-  <div class="step-label">2. Enter keyword and scan</div>
+  <div class="step-label">2. Enter keyword</div>
   <div class="search-box">
     <input type="text" id="keyword" placeholder="Search keyword" />
-    <button class="btn btn-dark" id="searchBtn">Scan</button>
+    <button class="btn btn-outline" id="searchBtn" title="Scrapes only the posts currently visible on screen right now - no scrolling.">Quick Scan</button>
   </div>
 
+  <div class="step-label">3. Set a post limit</div>
+  <div class="search-box">
+    <input type="number" id="maxPosts" placeholder="Max posts to scrape" value="100" min="1" max="1000" step="1" />
+  </div>
+
+  <div class="step-label">4. Scan the whole page</div>
   <div class="btn-group">
-    <button class="btn btn-outline" id="autoScrapeBtn">Auto-Scan</button>
+    <button class="btn btn-dark" id="autoScrapeBtn" title="Auto-scrolls the feed and scans every post up to your limit, reading each post's permalink straight from its timestamp link.">Start Auto-Scan</button>
     <button class="btn btn-outline-red" id="stopBtn" style="display:none;">Stop</button>
     <button class="btn btn-outline btn-sm" id="clearBtn">Clear</button>
   </div>
@@ -172,10 +184,11 @@
       <button class="btn btn-outline" id="exportTxtBtn">TXT</button>
       <button class="btn btn-outline" id="exportUidBtn">Post IDs</button>
     </div>
-    <span class="footer-note">Max: 1000 posts</span>
+    <span class="footer-note" id="limitNote">Hard cap: 1000 posts</span>
   </div>
 </div>
 
+
 <script src="popup.js"></script>
 </body>
-</html> 
+</html>

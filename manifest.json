@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Facebook Post Scraper Pro",
-  "version": "3.1",
+  "version": "3.2",
   "description": "Scrape Facebook Page posts by keyword, verify by post ID, and export engagement data",
   "permissions": [
     "activeTab",
