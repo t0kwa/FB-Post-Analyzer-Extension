@@ -1,69 +1,66 @@
-FB Page Keyword Analytics — Chrome Extension
-Scans the Facebook posts you've already scrolled into view on the current
-page/tab, finds ones matching a keyword, and totals up their reactions,
-comments, and shares.
+FACEBOOK POST SCRAPER VIA KEYWORD SEARCH – A Chrome Extension
 
-How it works (and its limits)
-You log into Facebook normally, in your normal browser tab. The extension
-never touches your login — it only reads the page after you're
-already on it.
+The Facebook Post Scraper via Keyword Search is a Chrome extension developed using JavaScript to handle its core functionality, including searching, scanning, filtering, and extracting Facebook posts based on user-defined keywords. The extension also utilizes HTML for its structure and CSS for its user interface, providing a clean, intuitive, and user-friendly design that enhances usability and makes data collection more efficient.
 
-Two scan modes:
+The primary objective of this extension is to help users quickly locate Facebook posts containing specific keywords without manually browsing through an entire page. In addition to finding relevant posts, the extension collects engagement metrics and allows users to export the gathered information for further analysis.
 
-Quick scan — reads only whatever posts are currently loaded on
-screen. Fast, but you need to manually scroll first to load more posts.
-Auto-scan — the extension scrolls the page for you, gradually,
-with a randomized delay between steps (so it isn't hammering the page),
-re-scanning after every scroll and streaming newly found matches into
-the popup live. It stops automatically when it reaches the bottom of
-what Facebook will load, when you click Stop, when you close the
-popup, or after a safety cap of scroll passes (to avoid it running
-forever unattended).
+How It Works?
 
-Reaction/comment/share counts are read from the numbers Facebook displays
-on-screen. Facebook's HTML structure is obfuscated and changes over time,
-so counts can occasionally be missed or read as 0 if their markup shifts —
-you may need to tweak the selectors in `content.js`.
+1.Log in to Facebook
 
-This reads only what's rendered in your browser; it doesn't call any
-private Facebook API and doesn't bypass any login or security barrier.
-Heads up: Facebook's Terms of Service restrict automated data
-collection from the platform, even when done via a passive DOM reader like
-this. This tool is intended for scanning your own view / pages you manage,
-at a small, manual scale (not high-volume or continuous scraping). If you
-need reliable, ToS-compliant analytics — especially at scale, or for pages
-you administer — use Meta's official Graph API / Meta Business Suite
-Insights, which expose reactions, comments, and shares directly and
-without this kind of DOM guesswork.
+The user must first sign in to their Facebook account using Google Chrome. Since the extension interacts with the currently opened Facebook page, an active login session is required before any scanning or data extraction can begin.
 
-Install (unpacked, for development/testing)
-Open `chrome://extensions` in Chrome.
-Turn on Developer mode (top-right toggle).
-Click Load unpacked and select this folder.
-Pin the extension from the puzzle-piece icon in the toolbar.
+2.Open the Extension and Enter the Required Information
 
-Use
-Go to `facebook.com`, log in, and navigate to the page you want to check.
-Click the extension icon.
+After logging in, the user opens the Chrome extension and provides the necessary inputs, such as:
 
-Type a keyword.
-Either:
-Click ▶ Auto-scan (scroll & collect) and let it run — it will
-scroll, collect matches, and update the list live until it finishes or
-you click Stop; or
+The keyword or phrase to search for.
+The maximum number of posts to scan (if applicable).
+Other available search or filtering options supported by the extension.
 
-Click Quick scan (visible posts only) to just check what's already
-loaded, scrolling manually between scans if you want more coverage.
-Matching posts and totals (reactions/comments/shares) appear in the
-popup as they're found.
+These inputs determine which Facebook posts will be analyzed during the scanning process.
 
-Note: closing the popup while auto-scan is running will stop it (Chrome
-tears down the connection between the popup and the page), so keep the
-popup open — or open it in its own window/tab if your Chrome version
-supports "Open in new window" — while a scan is in progress.
+3.Click the "Auto-Scan" Button
 
-Files
+Once all required information has been entered, the user simply clicks the "Auto-Scan" button.
 
-`manifest.json` — extension configuration (Manifest V3)
-`popup.html` / `popup.js` — the toolbar popup UI
-`content.js` — reads the Facebook page DOM and extracts matching posts + metricss
+Unlike manual searching, the Auto-Scan feature automatically scrolls through the Facebook page and continuously loads additional posts. This eliminates the need for the user to manually scroll through the page before the extension begins scanning, making the process faster, more convenient, and less time-consuming.
+
+During this process, the extension searches each loaded post for the specified keyword while collecting relevant information associated with matching posts.
+
+4.Display the Search Results
+
+After the scanning process is complete, the extension displays all Facebook posts containing the searched keyword.
+
+For each matching post, the extension presents relevant details, which may include:
+
+Post content or caption
+Date and time of posting
+Number of reactions
+Number of comments
+Number of shares
+Other available engagement metrics
+
+The total number of displayed results depends on how many Facebook posts contain the specified keyword within the scanned posts. If more matching posts exist, more results will be shown; otherwise, fewer results will appear.
+
+5.Export the Collected Data
+
+After reviewing the search results, the user can export the collected data for documentation, reporting, or further analysis.
+
+The extension supports exporting the results in either:
+
+CSV (.csv) – Ideal for Microsoft Excel, Google Sheets, and statistical analysis.
+JSON (.json) – Suitable for developers, data processing, and integration with other software applications.
+
+Exporting the data enables users to perform additional analysis, visualize trends, generate reports, or use the information for research purposes without repeating the scanning process.
+
+*Key Features
+Keyword-based Facebook post searching
+Automatic page scrolling through the Auto-Scan feature
+Efficient scanning of loaded Facebook posts
+Collection of engagement metrics (reactions, comments, shares, etc., where available)
+User-friendly and intuitive interface
+Export results in CSV and JSON formats
+Faster and more efficient than manually searching through Facebook pages
+
+This extension streamlines the process of finding Facebook posts related to a specific topic or keyword, making it a practical tool for researchers, marketers, students, data analysts, and anyone who needs to collect and analyze publicly accessible Facebook post data more efficiently.

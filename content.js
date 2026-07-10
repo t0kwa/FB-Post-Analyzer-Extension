@@ -1,22 +1,5 @@
-// content.js - Full Facebook Post Scraper (with single-post verification)
-//
-// The post-grouping / author-matching / link-resolution logic below is
-// ported from a reference Playwright scraper (facebook.js). Selectors,
-// aria-labels, and Facebook-specific strings are kept verbatim from that
-// reference so behavior matches exactly. The one thing that had to change
-// going from a Playwright script to a Chrome extension content script:
-//   - There's no page.evaluate() boundary here - content scripts already
-//     run with direct DOM access, so the reference's page.evaluate(...)
-//     wrappers are simply removed; the DOM logic inside them is unchanged.
-//
-// LINK RESOLUTION: post permalinks are read straight out of the DOM (the
-// post's timestamp anchor, header links, raw markup, or a built /posts/<id>
-// URL from an extracted post id) - see getPostLink() / getTimestampPermalink()
-// below. There is deliberately no "click Share -> click Copy link -> read
-// clipboard" step: that flow depends on Facebook's share-dialog markup,
-// which changes often and made link resolution flaky/slow. The timestamp
-// anchor is the same link Facebook's own UI uses when you click the
-// timestamp to open a post, so it's both reliable and requires no clicking.
+// Full Facebook Post Scraper (with single-post verification)
+
 
 console.log('[FB-SCRAPER] Content script loaded');
 
@@ -28,98 +11,107 @@ const MAX_SCAN_LIMIT = 5000;
 
 // Listen for messages
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  console.log('[FB-SCRAPER] Message:', request.action);
+  console.log('[FB-SCRAPER] Message:', request?.action);
 
-  if (request.action === 'PING') {
-    sendResponse({ alive: true, postsFound: allScrapedPosts.length });
-    return true;
-  }
-
-  if (request.action === 'SCRAPE_POSTS') {
-    (async () => {
-      try {
-        if (!request.isAutoScrape) {
-          allScrapedPosts = [];
-          rawPosts = [];
-          seenRaw = new Map();
-        }
-        const results = await scrapePosts(request.keyword, request.maxPosts);
-        sendResponse(results);
-      } catch (e) {
-        console.error('[FB-SCRAPER] Scrape error:', e, e && e.stack ? e.stack : 'no-stack');
-        sendResponse({ posts: allScrapedPosts, scanned: 0, error: e && e.message ? e.message : String(e) });
-      }
-    })();
-    return true;
-  }
-
-  if (request.action === 'SCROLL_DOWN') {
-    (async () => {
-      const before = {
-        scrollY: Math.round(window.scrollY || document.documentElement.scrollTop || 0),
-        height: Math.round(document.documentElement.scrollHeight || document.body.scrollHeight || 0)
-      };
-
-      try {
-        window.scrollBy({ top: Math.max(window.innerHeight * 0.55, 550), left: 0, behavior: 'instant' });
-      } catch (e) {
-        window.scrollBy(0, 800);
-      }
-      try {
-        window.dispatchEvent(new WheelEvent('wheel', { deltaY: 700, bubbles: true, cancelable: true }));
-      } catch (e) {}
-
-      const grew = await waitFor(() => {
-        const scrollY = Math.round(window.scrollY || document.documentElement.scrollTop || 0);
-        const height = Math.round(document.documentElement.scrollHeight || document.body.scrollHeight || 0);
-        return (scrollY > before.scrollY + 100 || height > before.height + 100) ? true : null;
-      }, 4000, 150);
-
-      sendResponse({ done: true, grew: !!grew });
-    })();
-    return true;
-  }
-
-  if (request.action === 'GET_PAGE_INFO') {
-    const info = getPageInfo();
-    sendResponse(info);
-    return true;
-  }
-
-  if (request.action === 'CHECK_LOGIN') {
-    const loggedIn = isFacebookLoggedIn();
-    sendResponse({ loggedIn, url: window.location.href });
-    return true;
-  }
-
-  if (request.action === 'CLEAR_ACCUMULATED') {
-    allScrapedPosts = [];
-    rawPosts = [];
-    seenRaw = new Map();
-    sendResponse({ done: true });
-    return true;
-  }
-
-  if (request.action === 'GET_SCRAPED_DATA') {
-    sendResponse({
-      posts: allScrapedPosts,
-      count: allScrapedPosts.length,
-      pageName: currentPageName,
-      pageUrl: window.location.href
-    });
-    return true;
-  }
-
-  if (request.action === 'NAVIGATE_TO_POST') {
-    try {
-      const postData = request.postData;
-      const result = navigateToPost(postData);
-      sendResponse(result);
-    } catch (e) {
-      console.error('[FB-SCRAPER] Navigation error:', e);
-      sendResponse({ success: false, error: e.message });
+  try {
+    if (request.action === 'PING') {
+      sendResponse({ alive: true, postsFound: allScrapedPosts.length });
+      return false;
     }
-    return true;
+
+    if (request.action === 'SCRAPE_POSTS') {
+      (async () => {
+        try {
+          if (!request.isAutoScrape) {
+            allScrapedPosts = [];
+            rawPosts = [];
+            seenRaw = new Map();
+          }
+          const results = await scrapePosts(request.keyword, request.maxPosts);
+          sendResponse(results);
+        } catch (e) {
+          console.error('[FB-SCRAPER] Scrape error:', e, e && e.stack ? e.stack : 'no-stack');
+          sendResponse({ posts: allScrapedPosts, scanned: 0, error: e && e.message ? e.message : String(e) });
+        }
+      })();
+      return true;
+    }
+
+    if (request.action === 'SCROLL_DOWN') {
+      (async () => {
+        const before = {
+          scrollY: Math.round(window.scrollY || document.documentElement.scrollTop || 0),
+          height: Math.round(document.documentElement.scrollHeight || document.body.scrollHeight || 0)
+        };
+
+        try {
+          window.scrollBy({ top: Math.max(window.innerHeight * 0.55, 550), left: 0, behavior: 'instant' });
+        } catch (e) {
+          window.scrollBy(0, 800);
+        }
+
+        try {
+          window.dispatchEvent(new WheelEvent('wheel', { deltaY: 700, bubbles: true, cancelable: true }));
+        } catch (e) {}
+
+        const grew = await waitFor(() => {
+          const scrollY = Math.round(window.scrollY || document.documentElement.scrollTop || 0);
+          const height = Math.round(document.documentElement.scrollHeight || document.body.scrollHeight || 0);
+          return (scrollY > before.scrollY + 100 || height > before.height + 100) ? true : null;
+        }, 4000, 150);
+
+        sendResponse({ done: true, grew: !!grew });
+      })();
+      return true;
+    }
+
+    if (request.action === 'GET_PAGE_INFO') {
+      const info = getPageInfo();
+      sendResponse(info);
+      return false;
+    }
+
+    if (request.action === 'CHECK_LOGIN') {
+      const loggedIn = isFacebookLoggedIn();
+      sendResponse({ loggedIn, url: window.location.href });
+      return false;
+    }
+
+    if (request.action === 'CLEAR_ACCUMULATED') {
+      allScrapedPosts = [];
+      rawPosts = [];
+      seenRaw = new Map();
+      sendResponse({ done: true });
+      return false;
+    }
+
+    if (request.action === 'GET_SCRAPED_DATA') {
+      sendResponse({
+        posts: allScrapedPosts,
+        count: allScrapedPosts.length,
+        pageName: currentPageName,
+        pageUrl: window.location.href
+      });
+      return false;
+    }
+
+    if (request.action === 'NAVIGATE_TO_POST') {
+      try {
+        const postData = request.postData;
+        const result = navigateToPost(postData);
+        sendResponse(result);
+      } catch (e) {
+        console.error('[FB-SCRAPER] Navigation error:', e);
+        sendResponse({ success: false, error: e.message });
+      }
+      return false;
+    }
+
+    return false;
+  } catch (e) {
+    console.error('[FB-SCRAPER] Message handler failed:', e);
+    sendResponse({ error: e && e.message ? e.message : String(e) });
+    return false;
   }
 });
 

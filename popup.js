@@ -1,4 +1,4 @@
-// popup.js - Full Scraper Controller with Login Check, Scan, and Export
+// Full Scraper Controller with Login Check, Scan, and Export
 
 const keywordInput = document.getElementById('keyword');
 const pageUrlInput = document.getElementById('pageUrl');
@@ -19,9 +19,6 @@ const loginBtn = document.getElementById('loginBtn');
 const openWindowBtn = document.getElementById('openWindowBtn');
 const exportCsvBtn = document.getElementById('exportCsvBtn');
 const exportJsonBtn = document.getElementById('exportJsonBtn');
-const exportExcelBtn = document.getElementById('exportExcelBtn');
-const exportTxtBtn = document.getElementById('exportTxtBtn');
-const exportUidBtn = document.getElementById('exportUidBtn');
 
 let isScraping = false;
 let shouldStop = false;
@@ -33,6 +30,22 @@ function getDesiredMaxPosts() {
   const raw = parseInt(maxPostsInput.value, 10);
   if (!Number.isFinite(raw) || raw < 1) return HARD_CAP;
   return Math.min(HARD_CAP, raw);
+}
+
+async function sendMessageToTab(tabId, message) {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      if (response === undefined) {
+        reject(new Error('No response from content script'));
+        return;
+      }
+      resolve(response);
+    });
+  });
 }
 
 // ============================================
@@ -243,7 +256,7 @@ async function doScrape(keyword, isAuto = false) {
     }
 
     try {
-      await chrome.tabs.sendMessage(tab.id, { action: 'PING' });
+      await sendMessageToTab(tab.id, { action: 'PING' });
     } catch (e) {
       setStatus('Please refresh the Facebook page (F5) and try again', 'error');
       searchBtn.disabled = false;
@@ -251,12 +264,20 @@ async function doScrape(keyword, isAuto = false) {
     }
 
     const maxPosts = getDesiredMaxPosts();
-    const response = await chrome.tabs.sendMessage(tab.id, {
-      action: 'SCRAPE_POSTS',
-      keyword: keyword,
-      isAutoScrape: isAuto,
-      maxPosts: maxPosts
-    });
+    let response;
+    try {
+      response = await sendMessageToTab(tab.id, {
+        action: 'SCRAPE_POSTS',
+        keyword: keyword,
+        isAutoScrape: isAuto,
+        maxPosts: maxPosts
+      });
+    } catch (e) {
+      console.error('[FB-SCRAPER] Message error:', e);
+      setStatus('Error communicating with page. Refresh and try again.', 'error');
+      searchBtn.disabled = false;
+      return;
+    }
 
     console.log('[FB-SCRAPER] Response:', response);
 
@@ -292,46 +313,6 @@ async function doScrape(keyword, isAuto = false) {
 // EXPORT FUNCTIONS (Step 7-8)
 // Columns: Post ID, Date Posted, Text, Reactions, Comments, Shares (+ extras)
 // ============================================
-async function exportToText(posts) {
-  if (!posts || posts.length === 0) {
-    setStatus('No posts to export', 'error');
-    return;
-  }
-  const unique = dedupeByPostId(posts);
-  const lines = unique.map(p => `Post ID: ${(p.postId || '')}\nDate Posted: ${(p.timestamp || '')}\nText: ${(p.text || '').replace(/\r?\n/g, ' ')}\nReactions: ${p.reactions || 0} Comments: ${p.comments || 0} Shares: ${p.shares || 0}\nURL: ${(p.url || '')}\n---`);
-  const content = lines.join('\n');
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-
-  chrome.downloads.download({
-    url: url,
-    filename: `facebook_posts_${new Date().toISOString().slice(0,10)}.txt`,
-    saveAs: true
-  });
-
-  setStatus(`Exported ${unique.length} unique posts to TXT`, 'success');
-}
-
-function exportUids(posts) {
-  if (!posts || posts.length === 0) {
-    setStatus('No posts to export', 'error');
-    return;
-  }
-
-  const unique = dedupeByPostId(posts);
-  const content = unique.map(p => p.postId || p.url).join('\n');
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-
-  chrome.downloads.download({
-    url: url,
-    filename: `facebook_post_ids_${new Date().toISOString().slice(0,10)}.txt`,
-    saveAs: true
-  });
-
-  setStatus(`Exported ${unique.length} unique post IDs`, 'success');
-}
-
 async function startAutoScrape() {
   const keyword = keywordInput.value.trim();
   const pageUrl = pageUrlInput.value.trim();
@@ -455,22 +436,16 @@ function exportToCSV(posts) {
   const unique = dedupeByPostId(posts);
 
   const headers = [
-    'Post ID', 'Date Posted', 'Text', 'Reactions', 'Comments', 'Shares',
-    'URL', 'Link Source', 'Author Name', 'Page Name', 'Scraped At'
+    "Author Name", "Post's Text", "Post's Link", 'Reactions', 'Comments', 'Shares'
   ];
 
   const rows = unique.map(p => [
-    p.postId || '',
-    p.timestamp || '',
+    p.authorName || '',
     (p.text || '').replace(/,/g, ';').replace(/\n/g, ' '),
+    p.url || '',
     p.reactions || 0,
     p.comments || 0,
-    p.shares || 0,
-    p.url || '',
-    p.linkSource || '',
-    p.authorName || '',
-    p.pageName || '',
-    p.scrapedAt || ''
+    p.shares || 0
   ]);
 
   const csvContent = [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
@@ -504,69 +479,6 @@ function exportToJSON(posts) {
   });
 
   setStatus(`Exported ${unique.length} unique posts to JSON`, 'success');
-}
-
-function exportToExcel(posts) {
-  if (!posts || posts.length === 0) {
-    setStatus('No posts to export', 'error');
-    return;
-  }
-  const unique = dedupeByPostId(posts);
-
-  let html = `
-    <html xmlns:o="urn:schemas-microsoft-com:office:office"
-          xmlns:x="urn:schemas-microsoft-com:office:excel"
-          xmlns="http://www.w3.org/TR/REC-html40">
-    <head><meta charset="UTF-8">
-    <!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>
-    <x:Name>Posts</x:Name><x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
-    </x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->
-    <style>
-      th { background-color: #1877f2; color: white; font-weight: bold; }
-      td { border: 1px solid #ccc; }
-    </style>
-    </head>
-    <body>
-    <table border="1">
-    <tr>
-      <th>Post ID</th><th>Date Posted</th><th>Text</th>
-      <th>Reactions</th><th>Comments</th><th>Shares</th>
-      <th>URL</th><th>Author Name</th><th>Page Name</th><th>Scraped At</th>
-    </tr>
-  `;
-
-  for (const p of unique) {
-    html += `
-      <tr>
-        <td>${(p.postId || '').replace(/"/g, '""')}</td>
-        <td>${(p.timestamp || '').replace(/"/g, '""')}</td>
-        <td>${((p.text || '').replace(/,/g, ';').replace(/\n/g, ' ')).replace(/"/g, '""')}</td>
-        <td>${p.reactions || 0}</td>
-        <td>${p.comments || 0}</td>
-        <td>${p.shares || 0}</td>
-        <td>${(p.url || '').replace(/"/g, '""')}</td>
-        <td>${(p.authorName || '').replace(/"/g, '""')}</td>
-        <td>${(p.pageName || '').replace(/"/g, '""')}</td>
-        <td>${(p.scrapedAt || '').replace(/"/g, '""')}</td>
-      </tr>
-    `;
-  }
-
-  html += '</table></body></html>';
-
-  const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-
-  chrome.downloads.download({
-    url: url,
-    filename: `facebook_posts_${new Date().toISOString().slice(0,10)}.xls`,
-    saveAs: true
-  });
-
-  const totalReactions = unique.reduce((sum, p) => sum + (p.reactions || 0), 0);
-  const totalComments = unique.reduce((sum, p) => sum + (p.comments || 0), 0);
-  const totalShares = unique.reduce((sum, p) => sum + (p.shares || 0), 0);
-  setStatus(`Exported ${unique.length} unique posts to Excel (Reactions: ${totalReactions.toLocaleString()}, Comments: ${totalComments.toLocaleString()}, Shares: ${totalShares.toLocaleString()})`, 'success');
 }
 
 function isSpecificFacebookPostUrl(url) {
@@ -686,9 +598,6 @@ clearBtn.addEventListener('click', clearResults);
 
 exportCsvBtn.addEventListener('click', () => exportToCSV(allPosts));
 exportJsonBtn.addEventListener('click', () => exportToJSON(allPosts));
-exportExcelBtn.addEventListener('click', () => exportToExcel(allPosts));
-exportTxtBtn.addEventListener('click', () => exportToText(allPosts));
-exportUidBtn.addEventListener('click', () => exportUids(allPosts));
 gotoPageBtn.addEventListener('click', startPageNavigation);
 
 keywordInput.addEventListener('keydown', (e) => {

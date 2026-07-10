@@ -1,4 +1,4 @@
-// background.js - Simplified service worker
+// Simplified service worker
 
 console.log('[FB-SCRAPER] Background script loaded');
 
